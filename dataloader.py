@@ -257,7 +257,7 @@ class myDataset(Dataset):
         self.numOfFramesPerSeq = numOfFramesPerSeq #number of frames per clip/video
         self.rawPath = rawPath #path for raw file
         self.qpPath = qpPath #path for encoded-decoded file
-        self.widthOrg =  #size of clip/video's width
+        self.widthOrg = width #size of clip/video's width
         self.heightOrg = height #size of clip/video's width
         self.frac = frac #fraction of data to be used for training
         self.cropSize = cropSize
