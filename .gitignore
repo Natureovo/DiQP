@@ -5,6 +5,7 @@ __pycache__/
 data/
 testResults/
 visResults/
+batchResults/
 report.csv
 report_v2.csv
 pretrained/*.pt

@@ -39,3 +39,13 @@ data/Encoded/101/QP-37/qp_037.mp4
 ```
 
 需要测试其他 LDV 视频时使用新的序列号，例如将 `002.mkv` 对应到 `--sequence 102`，不要覆盖已有实验。
+
+## 4. 多视频、多 QP 批量测试
+
+下面的命令自动测试前 5 个 LDV 视频，每个视频测试 QP 32、37、42，并计算每个 QP 和全部实验的平均增益：
+
+```bash
+/home/cp/anaconda3/envs/diqp/bin/python evaluate_ldv_batch.py --video-ids 1 2 3 4 5 --qps 32 37 42 --frames 60 --fraction 1 --batch-size 1 --save-limit 2
+```
+
+每次运行都会在 `batchResults/ldv_时间戳/` 下创建独立目录。`metrics.csv` 保存每个视频的结果，`summary.csv` 保存总体和分 QP 平均结果，`visuals/` 保存少量对比图。单个组合失败时脚本默认记录到 `failures.csv` 并继续执行后续组合。
