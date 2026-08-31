@@ -35,6 +35,25 @@ def run(command):
     subprocess.run(command, check=True)
 
 
+def find_working_ffmpeg():
+    candidates = ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", shutil.which("ffmpeg")]
+    checked = []
+    for candidate in candidates:
+        if not candidate or candidate in checked or not os.path.isfile(candidate):
+            continue
+        checked.append(candidate)
+        result = subprocess.run(
+            [candidate, "-version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if result.returncode == 0:
+            return candidate
+    raise RuntimeError(
+        "No working ffmpeg was found. Checked: " + ", ".join(checked)
+    )
+
+
 def remove_generated_files(raw_dir, encoded_dir, compressed_video):
     for directory in (raw_dir, encoded_dir):
         if not os.path.isdir(directory):
@@ -105,9 +124,8 @@ def main():
     if args.sequence < 0 or args.qp < 0:
         raise ValueError("--sequence and --qp must be non-negative.")
 
-    ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg is None:
-        raise RuntimeError("ffmpeg is not installed or is not on PATH.")
+    ffmpeg = find_working_ffmpeg()
+    print(f"Using ffmpeg   : {ffmpeg}")
 
     sequence_name = f"{args.sequence:03d}"
     raw_dir = os.path.join(args.output_root, "Raw", sequence_name)
