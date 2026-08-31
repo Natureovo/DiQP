@@ -28,6 +28,11 @@ def parse_args():
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--save-limit", type=int, default=2)
     parser.add_argument(
+        "--metric-mode",
+        choices=("full-frame", "patch"),
+        default="full-frame",
+    )
+    parser.add_argument(
         "--encoder",
         choices=("hevc_nvenc", "libx265"),
         default="hevc_nvenc",
@@ -56,6 +61,15 @@ def metric_mean(rows, field):
     return mean(float(row[field]) for row in rows)
 
 
+def optional_metric_mean(rows, field):
+    values = [float(row[field]) for row in rows if row.get(field, "") != ""]
+    return mean(values) if values else ""
+
+
+def positive_count(rows, field):
+    return sum(float(row[field]) > 0 for row in rows if row.get(field, "") != "")
+
+
 def write_summary(path, rows):
     field_names = [
         "Scope",
@@ -64,10 +78,14 @@ def write_summary(path, rows):
         "Mean PSNR Predicted",
         "Mean PSNR Base",
         "Mean PSNR Gain",
+        "Mean Y PSNR Predicted",
+        "Mean Y PSNR Base",
+        "Mean Y PSNR Gain",
         "Mean SSIM Predicted",
         "Mean SSIM Base",
         "Mean SSIM Gain",
         "Positive PSNR Runs",
+        "Positive Y PSNR Runs",
         "Positive SSIM Runs",
     ]
 
@@ -85,11 +103,15 @@ def write_summary(path, rows):
                 metric_mean(group_rows, "PSNR Predicted"),
                 metric_mean(group_rows, "PSNR Base"),
                 metric_mean(group_rows, "PSNR Gain"),
+                optional_metric_mean(group_rows, "Y PSNR Predicted"),
+                optional_metric_mean(group_rows, "Y PSNR Base"),
+                optional_metric_mean(group_rows, "Y PSNR Gain"),
                 metric_mean(group_rows, "SSIM Predicted"),
                 metric_mean(group_rows, "SSIM Base"),
                 metric_mean(group_rows, "SSIM Gain"),
-                sum(float(row["PSNR Gain"]) > 0 for row in group_rows),
-                sum(float(row["SSIM Gain"]) > 0 for row in group_rows),
+                positive_count(group_rows, "PSNR Gain"),
+                positive_count(group_rows, "Y PSNR Gain"),
+                positive_count(group_rows, "SSIM Gain"),
             ]
         )
 
@@ -115,6 +137,8 @@ def main():
         raise ValueError("--frames must be at least 3.")
     if not 0 < args.fraction <= 1:
         raise ValueError("--fraction must be greater than 0 and no greater than 1.")
+    if args.metric_mode == "full-frame" and args.fraction != 1:
+        raise ValueError("Full-frame metrics require --fraction 1 for complete coverage.")
 
     run_id = datetime.now().strftime("ldv_%Y%m%d_%H%M%S")
     run_dir = os.path.join(args.run_root, run_id)
@@ -122,6 +146,9 @@ def main():
     summary_path = os.path.join(run_dir, "summary.csv")
     failures_path = os.path.join(run_dir, "failures.csv")
     os.makedirs(run_dir, exist_ok=False)
+    with open(os.path.join(run_dir, "protocol.txt"), "w", encoding="utf8") as protocol_file:
+        for key, value in sorted(vars(args).items()):
+            protocol_file.write(f"{key}={value}\n")
 
     prepare_script = os.path.join(BASE_DIR, "prepare_ldv.py")
     test_script = os.path.join(BASE_DIR, "test.py")
@@ -196,6 +223,8 @@ def main():
                 "--report",
                 metrics_path,
             ]
+            if args.metric_mode == "full-frame":
+                test_command.append("--full-frame-metrics")
 
             try:
                 run_command(prepare_command)
@@ -218,9 +247,11 @@ def main():
 
     print("\nBatch evaluation finished")
     for row in summary_rows:
+        y_gain = f"{row[8]:+.4f} dB" if row[8] != "" else "n/a"
         print(
-            f"{row[0]:>5}: runs={row[2]}, PSNR gain={row[5]:+.4f} dB, "
-            f"SSIM gain={row[8]:+.6f}, positive PSNR={row[9]}/{row[2]}"
+            f"{row[0]:>5}: runs={row[2]}, RGB PSNR gain={row[5]:+.4f} dB, "
+            f"Y PSNR gain={y_gain}, SSIM gain={row[11]:+.6f}, "
+            f"positive RGB={row[12]}/{row[2]}"
         )
     print(f"Metrics        : {metrics_path}")
     print(f"Summary        : {summary_path}")

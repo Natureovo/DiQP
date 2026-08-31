@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from dataloader import myDataset
 from model import DiQP
-from utils.frame_utils import batch_ssim, calcPSNR, reorder_image
+from utils.frame_utils import batch_ssim, calcPSNR, calculate_ssim, reorder_image
 
 warnings.filterwarnings("ignore")
 
@@ -54,6 +54,11 @@ def parse_args():
     parser.add_argument("--results-dir", default=os.path.join(BASE_DIR, "testResults"))
     parser.add_argument("--report", default=os.path.join(BASE_DIR, "report_v2.csv"))
     parser.add_argument("--no-amp", action="store_true")
+    parser.add_argument(
+        "--full-frame-metrics",
+        action="store_true",
+        help="Blend overlapping predictions and evaluate each reconstructed frame once.",
+    )
     return parser.parse_args()
 
 
@@ -193,6 +198,202 @@ def save_visual_comparisons(output, encoded, raw, result_dir, saved, limit):
     return saved
 
 
+def blend_weight(crop_size):
+    coordinate = torch.linspace(-1.0, 1.0, crop_size)
+    weight_1d = 0.5 * (1.0 + torch.cos(np.pi * coordinate))
+    weight_1d = torch.clamp(weight_1d, min=0.05)
+    return torch.outer(weight_1d, weight_1d).unsqueeze(0)
+
+
+class FullFrameAccumulator:
+    def __init__(self, width, height, crop_size):
+        self.width = width
+        self.height = height
+        self.weight = blend_weight(crop_size)
+        self.prediction_sums = {}
+        self.weight_sums = {}
+
+    def add_batch(self, predictions, locations, metadata):
+        if predictions.ndim != 5:
+            raise ValueError(
+                f"Expected predictions in BxCxFxHxW order, got {predictions.shape}."
+            )
+        middle_frames = torch.as_tensor(metadata[1]).reshape(-1)
+        left_offsets = locations[:, 2, 0].reshape(-1)
+        top_offsets = locations[:, 3, 0].reshape(-1)
+
+        for batch_index in range(predictions.shape[0]):
+            middle = int(middle_frames[batch_index])
+            left = int(left_offsets[batch_index])
+            top = int(top_offsets[batch_index])
+            bottom = top + predictions.shape[-2]
+            right = left + predictions.shape[-1]
+            if left < 0 or top < 0 or right > self.width or bottom > self.height:
+                raise ValueError(
+                    "Prediction tile is outside the frame: "
+                    f"left={left}, top={top}, right={right}, bottom={bottom}, "
+                    f"frame={self.width}x{self.height}."
+                )
+
+            for temporal_index in range(predictions.shape[2]):
+                frame_number = middle - 1 + temporal_index
+                if frame_number not in self.prediction_sums:
+                    self.prediction_sums[frame_number] = torch.zeros(
+                        (3, self.height, self.width), dtype=torch.float32
+                    )
+                    self.weight_sums[frame_number] = torch.zeros(
+                        (1, self.height, self.width), dtype=torch.float32
+                    )
+                self.prediction_sums[frame_number][:, top:bottom, left:right] += (
+                    predictions[batch_index, :, temporal_index].float() * self.weight
+                )
+                self.weight_sums[frame_number][:, top:bottom, left:right] += self.weight
+
+    def reconstruct(self, frame_number):
+        weight = self.weight_sums[frame_number]
+        uncovered = int(torch.count_nonzero(weight <= 0))
+        if uncovered:
+            raise RuntimeError(
+                f"Frame {frame_number} has {uncovered} pixels not covered by any tile."
+            )
+        return torch.clamp(self.prediction_sums[frame_number] / weight, 0, 1)
+
+    def frame_numbers(self):
+        return sorted(self.prediction_sums)
+
+
+def load_rgb_tensor(path):
+    image = cv2.imread(path)
+    if image is None:
+        raise FileNotFoundError(f"Could not read full frame: {path}")
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    return torch.from_numpy(image.copy()).permute(2, 0, 1).float() / 255.0
+
+
+def standard_psnr(prediction, reference):
+    mse = torch.mean((prediction - reference) ** 2).item()
+    if mse == 0:
+        return float("inf")
+    return 10.0 * np.log10(1.0 / mse)
+
+
+def rgb_to_y(image):
+    # HD video luma derived from normalized RGB using BT.709 coefficients.
+    coefficients = torch.tensor([0.2126, 0.7152, 0.0722]).view(3, 1, 1)
+    return torch.sum(image * coefficients, dim=0, keepdim=True)
+
+
+def evaluate_full_frames(
+    accumulator,
+    raw_seq_dir,
+    encoded_seq_dir,
+    raw_suffix,
+    result_dir,
+    save_limit,
+):
+    os.makedirs(result_dir, exist_ok=True)
+    frame_numbers = accumulator.frame_numbers()
+    if not frame_numbers:
+        raise RuntimeError("No full frames were reconstructed.")
+
+    visual_count = min(save_limit, len(frame_numbers))
+    visual_indices = set()
+    if visual_count > 0:
+        visual_indices = set(
+            int(index)
+            for index in np.linspace(0, len(frame_numbers) - 1, visual_count)
+        )
+
+    rows = []
+    for frame_index, frame_number in enumerate(frame_numbers):
+        prediction = accumulator.reconstruct(frame_number)
+        reference = load_rgb_tensor(
+            os.path.join(raw_seq_dir, f"{frame_number:03d}{raw_suffix}.png")
+        )
+        compressed = load_rgb_tensor(
+            os.path.join(encoded_seq_dir, f"{frame_number:03d}.png")
+        )
+        if prediction.shape != reference.shape or compressed.shape != reference.shape:
+            raise RuntimeError(
+                f"Full-frame dimensions differ at frame {frame_number}: "
+                f"prediction={tuple(prediction.shape)}, "
+                f"encoded={tuple(compressed.shape)}, raw={tuple(reference.shape)}."
+            )
+
+        psnr_prediction = standard_psnr(prediction, reference)
+        psnr_base = standard_psnr(compressed, reference)
+        y_psnr_prediction = standard_psnr(rgb_to_y(prediction), rgb_to_y(reference))
+        y_psnr_base = standard_psnr(rgb_to_y(compressed), rgb_to_y(reference))
+        prediction_hwc = prediction.permute(1, 2, 0).numpy()
+        compressed_hwc = compressed.permute(1, 2, 0).numpy()
+        reference_hwc = reference.permute(1, 2, 0).numpy()
+        ssim_prediction = calculate_ssim(
+            prediction_hwc, reference_hwc, data_range=1.0
+        )
+        ssim_base = calculate_ssim(compressed_hwc, reference_hwc, data_range=1.0)
+        rows.append(
+            [
+                frame_number,
+                psnr_prediction,
+                psnr_base,
+                psnr_prediction - psnr_base,
+                y_psnr_prediction,
+                y_psnr_base,
+                y_psnr_prediction - y_psnr_base,
+                ssim_prediction,
+                ssim_base,
+                ssim_prediction - ssim_base,
+            ]
+        )
+
+        if frame_index in visual_indices:
+            save_image(
+                torch.cat([compressed, prediction, reference], dim=2),
+                os.path.join(result_dir, f"full_comparison_{frame_number:03d}.png"),
+            )
+            encoded_error = torch.clamp(torch.abs(compressed - reference) * 5.0, 0, 1)
+            predicted_error = torch.clamp(torch.abs(prediction - reference) * 5.0, 0, 1)
+            save_image(
+                torch.cat([encoded_error, predicted_error], dim=2),
+                os.path.join(result_dir, f"full_difference_x5_{frame_number:03d}.png"),
+            )
+
+    frame_report = os.path.join(result_dir, "full_frame_metrics.csv")
+    with open(frame_report, "w", encoding="utf8", newline="") as report_file:
+        writer = csv.writer(report_file)
+        writer.writerow(
+            [
+                "Frame",
+                "PSNR Predicted",
+                "PSNR Base",
+                "PSNR Gain",
+                "Y PSNR Predicted (BT.709)",
+                "Y PSNR Base (BT.709)",
+                "Y PSNR Gain (BT.709)",
+                "SSIM Predicted",
+                "SSIM Base",
+                "SSIM Gain",
+            ]
+        )
+        writer.writerows(rows)
+
+    values = np.asarray([row[1:] for row in rows], dtype=np.float64)
+    averages = values.mean(axis=0)
+    return {
+        "frames": len(rows),
+        "psnr_predicted": averages[0],
+        "psnr_base": averages[1],
+        "psnr_gain": averages[2],
+        "y_psnr_predicted": averages[3],
+        "y_psnr_base": averages[4],
+        "y_psnr_gain": averages[5],
+        "ssim_predicted": averages[6],
+        "ssim_base": averages[7],
+        "ssim_gain": averages[8],
+        "frame_report": frame_report,
+    }
+
+
 def append_report(path, row):
     field_names = [
         "Dataset",
@@ -200,20 +401,32 @@ def append_report(path, row):
         "Resolution",
         "QP",
         "Model",
+        "Metric Mode",
         "Samples",
         "PSNR Predicted",
         "PSNR Base",
         "PSNR Gain",
+        "Y PSNR Predicted",
+        "Y PSNR Base",
+        "Y PSNR Gain",
         "SSIM Predicted",
         "SSIM Base",
         "SSIM Gain",
     ]
     file_exists = os.path.isfile(path)
+    if file_exists:
+        with open(path, "r", encoding="utf8", newline="") as report_file:
+            existing_header = next(csv.reader(report_file), [])
+        if existing_header != field_names:
+            root, extension = os.path.splitext(path)
+            path = f"{root}_v3{extension}"
+            file_exists = os.path.isfile(path)
     with open(path, "a", encoding="utf8", newline="") as report_file:
         writer = csv.writer(report_file)
         if not file_exists:
             writer.writerow(field_names)
         writer.writerow(row)
+    return path
 
 
 def main():
@@ -222,6 +435,8 @@ def main():
 
     if not 0 < args.fraction <= 1:
         raise ValueError("--fraction must be greater than 0 and no greater than 1.")
+    if args.full_frame_metrics and args.fraction != 1:
+        raise ValueError("--full-frame-metrics requires --fraction 1 for complete coverage.")
     if args.crop_size != 512:
         raise ValueError("The released pretrained checkpoints require --crop-size 512.")
     if not os.path.isfile(args.model_path):
@@ -302,11 +517,17 @@ def main():
     metric_sums = np.zeros(10, dtype=np.float64)
     evaluated_samples = 0
     visualizations_saved = 0
+    full_frame_accumulator = (
+        FullFrameAccumulator(width, height, args.crop_size)
+        if args.full_frame_metrics
+        else None
+    )
 
     with torch.no_grad():
         for batch in tqdm(testloader, desc="Testing"):
-            x_cropped, y_cropped, around, ahead_cropped, ahead_scaled, loc, _, decay = batch
+            x_cropped, y_cropped, around, ahead_cropped, ahead_scaled, loc, metadata, decay = batch
             current_batch_size = x_cropped.shape[0]
+            loc_cpu = loc
 
             x_cropped = x_cropped.to(device, non_blocking=True)
             y_cropped = y_cropped.to(device, non_blocking=True)
@@ -344,7 +565,10 @@ def main():
             metric_sums += batch_metrics * current_batch_size
             evaluated_samples += current_batch_size
 
-            if args.save_limit > 0:
+            if full_frame_accumulator is not None:
+                full_frame_accumulator.add_batch(output_cpu, loc_cpu, metadata)
+
+            if args.save_limit > 0 and full_frame_accumulator is None:
                 visualizations_saved = save_visual_comparisons(
                     output_cpu,
                     encoded_cpu,
@@ -364,8 +588,40 @@ def main():
     ssim_base = metrics[9]
     psnr_gain = psnr_predicted - psnr_base
     ssim_gain = ssim_predicted - ssim_base
+    y_psnr_predicted = ""
+    y_psnr_base = ""
+    y_psnr_gain = ""
+    metric_mode = "patch"
+    evaluated_units = evaluated_samples
 
-    append_report(
+    if full_frame_accumulator is not None:
+        patch_psnr_gain = psnr_gain
+        patch_ssim_gain = ssim_gain
+        full_metrics = evaluate_full_frames(
+            full_frame_accumulator,
+            raw_seq_dir,
+            encoded_seq_dir,
+            raw_suffix,
+            args.results_dir,
+            args.save_limit,
+        )
+        psnr_predicted = full_metrics["psnr_predicted"]
+        psnr_base = full_metrics["psnr_base"]
+        psnr_gain = full_metrics["psnr_gain"]
+        y_psnr_predicted = full_metrics["y_psnr_predicted"]
+        y_psnr_base = full_metrics["y_psnr_base"]
+        y_psnr_gain = full_metrics["y_psnr_gain"]
+        ssim_predicted = full_metrics["ssim_predicted"]
+        ssim_base = full_metrics["ssim_base"]
+        ssim_gain = full_metrics["ssim_gain"]
+        evaluated_units = full_metrics["frames"]
+        metric_mode = "full-frame"
+        visualizations_saved = min(args.save_limit, evaluated_units)
+        print(f"Patch PSNR Gain: {patch_psnr_gain:+.4f} dB")
+        print(f"Patch SSIM Gain: {patch_ssim_gain:+.6f}")
+        print(f"Frame metrics  : {full_metrics['frame_report']}")
+
+    report_path = append_report(
         args.report,
         [
             encoded_seq_dir,
@@ -373,10 +629,14 @@ def main():
             f"{width}x{height}",
             qp_value,
             args.model_path,
-            evaluated_samples,
+            metric_mode,
+            evaluated_units,
             psnr_predicted,
             psnr_base,
             psnr_gain,
+            y_psnr_predicted,
+            y_psnr_base,
+            y_psnr_gain,
             ssim_predicted,
             ssim_base,
             ssim_gain,
@@ -384,14 +644,19 @@ def main():
     )
 
     print("Testing finished")
-    print(f"Evaluated samples: {evaluated_samples}")
+    print(f"Metric mode     : {metric_mode}")
+    print(f"Evaluated units : {evaluated_units}")
     print(f"PSNR Predicted : {psnr_predicted:.4f} dB")
     print(f"PSNR Base      : {psnr_base:.4f} dB")
     print(f"PSNR Gain      : {psnr_gain:+.4f} dB")
+    if metric_mode == "full-frame":
+        print(f"Y PSNR Predicted: {y_psnr_predicted:.4f} dB")
+        print(f"Y PSNR Base     : {y_psnr_base:.4f} dB")
+        print(f"Y PSNR Gain     : {y_psnr_gain:+.4f} dB")
     print(f"SSIM Predicted : {ssim_predicted:.6f}")
     print(f"SSIM Base      : {ssim_base:.6f}")
     print(f"SSIM Gain      : {ssim_gain:+.6f}")
-    print(f"Report         : {args.report}")
+    print(f"Report         : {report_path}")
     if visualizations_saved:
         print(f"Visualizations : {visualizations_saved} saved to {args.results_dir}")
 

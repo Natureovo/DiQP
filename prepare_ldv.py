@@ -2,6 +2,7 @@ import argparse
 import os
 import shutil
 import subprocess
+from fractions import Fraction
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -57,6 +58,46 @@ def find_working_ffmpeg():
     raise RuntimeError(
         "No working ffmpeg was found. Checked: " + ", ".join(checked)
     )
+
+
+def detect_source_frame_rate(ffmpeg, input_video):
+    ffprobe_candidates = [
+        os.path.join(os.path.dirname(ffmpeg), "ffprobe"),
+        "/usr/bin/ffprobe",
+        "/usr/local/bin/ffprobe",
+        shutil.which("ffprobe"),
+    ]
+    checked = []
+    for ffprobe in ffprobe_candidates:
+        if not ffprobe or ffprobe in checked or not os.path.isfile(ffprobe):
+            continue
+        checked.append(ffprobe)
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=avg_frame_rate",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                input_video,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        value = result.stdout.strip()
+        if result.returncode == 0 and value:
+            try:
+                if Fraction(value) > 0:
+                    return value
+            except (ValueError, ZeroDivisionError):
+                pass
+    print("Could not detect source FPS; using 30 fps for encoded video timing.")
+    return "30"
 
 
 def remove_generated_files(raw_dir, encoded_dir, compressed_video):
@@ -146,7 +187,12 @@ def main():
 
     raw_pattern = os.path.join(raw_dir, "%03d.png")
     encoded_pattern = os.path.join(encoded_dir, "%03d.png")
-    fps_value = str(args.fps if args.fps is not None else 30.0)
+    fps_value = (
+        str(args.fps)
+        if args.fps is not None
+        else detect_source_frame_rate(ffmpeg, os.path.abspath(args.input))
+    )
+    print(f"Encoding FPS   : {fps_value}")
 
     extract_command = [
         ffmpeg,

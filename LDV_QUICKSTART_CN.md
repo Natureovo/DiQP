@@ -42,10 +42,18 @@ data/Encoded/101/QP-37/qp_037.mp4
 
 ## 4. 多视频、多 QP 批量测试
 
-下面的命令自动测试前 5 个 LDV 视频，每个视频测试 QP 32、37、42，并计算每个 QP 和全部实验的平均增益：
+先用已经准备好的序列做一次整帧冒烟测试，确认服务器环境、显存和拼接流程正常：
+
+```bash
+/home/cp/anaconda3/envs/diqp/bin/python test.py --sequence 101 --qp 37 --fraction 1 --batch-size 1 --save-limit 3 --full-frame-metrics --report batchResults/fullframe_smoke.csv --results-dir batchResults/fullframe_smoke
+```
+
+`512×512` 是预训练模型固定的输入块大小，不是最终评价窗口。整帧模式会把所有重叠块加权拼回原始分辨率，并让每个视频帧只参与一次最终统计。整帧模式必须使用 `--fraction 1`，否则无法覆盖完整画面。
+
+下面的命令自动测试前 5 个 LDV 视频，每个视频测试 QP 32、37、42。默认将重叠的 512×512 预测加权拼回完整帧，再计算 RGB-PSNR、Y-PSNR 和 SSIM：
 
 ```bash
 /home/cp/anaconda3/envs/diqp/bin/python evaluate_ldv_batch.py --video-ids 1 2 3 4 5 --qps 32 37 42 --frames 60 --fraction 1 --batch-size 1 --save-limit 2
 ```
 
-每次运行都会在 `batchResults/ldv_时间戳/` 下创建独立目录。`metrics.csv` 保存每个视频的结果，`summary.csv` 保存总体和分 QP 平均结果，`visuals/` 保存少量对比图。单个组合失败时脚本默认记录到 `failures.csv` 并继续执行后续组合。
+每次运行都会在 `batchResults/ldv_时间戳/` 下创建独立目录。`metrics.csv` 保存每个视频的完整帧结果，`summary.csv` 保存总体和分 QP 平均结果，`visuals/` 保存完整帧对比图和逐帧指标，`protocol.txt` 记录本次参数。单个组合失败时脚本默认记录到 `failures.csv` 并继续执行后续组合。
