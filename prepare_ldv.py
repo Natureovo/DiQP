@@ -16,7 +16,12 @@ def parse_args():
     parser.add_argument("--sequence", type=int, default=101)
     parser.add_argument("--qp", type=int, default=37)
     parser.add_argument("--frames", type=int, default=12)
-    parser.add_argument("--fps", type=float, default=30.0)
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=None,
+        help="Optional resampling FPS. Omit it to preserve the source frame sequence.",
+    )
     parser.add_argument(
         "--encoder",
         choices=("hevc_nvenc", "libx265"),
@@ -91,7 +96,7 @@ def encoder_options(encoder, qp):
             "-c:v",
             "hevc_nvenc",
             "-preset",
-            "p4",
+            "medium",
             "-rc",
             "constqp",
             "-qp",
@@ -141,19 +146,21 @@ def main():
 
     raw_pattern = os.path.join(raw_dir, "%03d.png")
     encoded_pattern = os.path.join(encoded_dir, "%03d.png")
-    fps_value = str(args.fps)
+    fps_value = str(args.fps if args.fps is not None else 30.0)
 
-    run(
+    extract_command = [
+        ffmpeg,
+        "-hide_banner",
+        "-y",
+        "-i",
+        os.path.abspath(args.input),
+        "-map",
+        "0:v:0",
+    ]
+    if args.fps is not None:
+        extract_command.extend(["-vf", f"fps={fps_value}"])
+    extract_command.extend(
         [
-            ffmpeg,
-            "-hide_banner",
-            "-y",
-            "-i",
-            os.path.abspath(args.input),
-            "-map",
-            "0:v:0",
-            "-vf",
-            f"fps={fps_value}",
             "-frames:v",
             str(args.frames),
             "-start_number",
@@ -161,6 +168,7 @@ def main():
             raw_pattern,
         ]
     )
+    run(extract_command)
 
     encode_command = [
         ffmpeg,

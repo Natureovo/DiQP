@@ -15,6 +15,13 @@ from einops import rearrange
 
 
 class myDataset(Dataset):
+    def _tile_offsets(self, length):
+        max_offset = length - self.cropSize
+        offsets = list(range(0, max_offset + 1, self.cropSize))
+        if offsets[-1] != max_offset:
+            offsets.append(max_offset)
+        return offsets
+
     def _visible_window_origin(self):
         max_offset_w = max(self.widthOrg - self.VisibleWindow['width'], 0)
         max_offset_h = max(self.heightOrg - self.VisibleWindow['height'], 0)
@@ -123,8 +130,8 @@ class myDataset(Dataset):
             
         else:
             qp = [totalQualities]
-            offsetW = np.arange(0,self.VisibleWindow['width'],self.cropSize)
-            offsetH = np.arange(0,self.VisibleWindow['height'],self.cropSize)
+            offsetW = self._tile_offsets(self.VisibleWindow['width'])
+            offsetH = self._tile_offsets(self.VisibleWindow['height'])
             combinations = list(itertools.product(seqNumbers,middle,qp,offsetW,offsetH))
             df = pd.DataFrame(combinations, columns=['seqNum','middle', 'qp',"offsetW","offsetH"])
             df = df.sort_values(by=['seqNum','middle', 'qp',"offsetW","offsetH"]).reset_index(drop=True)
@@ -279,8 +286,6 @@ class myDataset(Dataset):
             raise ValueError("Visible window cannot be larger than the input frames.")
         if self.VisibleWindow['width'] < self.cropSize or self.VisibleWindow['height'] < self.cropSize:
             raise ValueError("Input frames must be at least as large as cropSize.")
-        if self.VisibleWindow['width'] % self.cropSize != 0 or self.VisibleWindow['height'] % self.cropSize != 0:
-            raise ValueError("Visible window dimensions must be divisible by cropSize.")
         self.random_state = random_state
         self.extractingMethod = extractingMethod
         self.totalQualities = totalQualities #number of steps/qualities/QP values
@@ -288,8 +293,8 @@ class myDataset(Dataset):
         self.augmentation = augmentation #flag for using augmentation
         self.transfrom = self._createAugmentions()
         if not train:
-            offsetW = np.arange(0,self.VisibleWindow['width'],self.cropSize)
-            offsetH = np.arange(0,self.VisibleWindow['height'],self.cropSize)
+            offsetW = self._tile_offsets(self.VisibleWindow['width'])
+            offsetH = self._tile_offsets(self.VisibleWindow['height'])
             self.offset = np.array(list(itertools.product(offsetW,offsetH)))
         self.sampleSpace = self._createSampleSpace(seqNumbers,numOfFramesPerSeq,extractingMethod,totalQualities,frac,random_state,)
 

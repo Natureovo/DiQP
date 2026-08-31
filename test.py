@@ -145,13 +145,11 @@ def detect_frame_geometry(raw_seq_dir, encoded_seq_dir, raw_suffix, crop_size):
         )
 
     height, width = raw_frame.shape[:2]
-    visible_height = (height // crop_size) * crop_size
-    visible_width = (width // crop_size) * crop_size
-    if visible_height < crop_size or visible_width < crop_size:
+    if height < crop_size or width < crop_size:
         raise RuntimeError(
             f"Frame size {width}x{height} is smaller than crop size {crop_size}."
         )
-    return width, height, visible_width, visible_height
+    return width, height, width, height
 
 
 def load_checkpoint(path, target_device):
