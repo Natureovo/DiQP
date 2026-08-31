@@ -1,7 +1,9 @@
 import argparse
 import os
+import shlex
 import shutil
 import subprocess
+import sys
 from fractions import Fraction
 
 
@@ -287,8 +289,9 @@ def main():
     print(f"Compressed HEVC: {compressed_video}")
     print("Next command:")
     print(
-        f"python test.py --sequence {args.sequence} --qp {args.qp} "
-        "--fraction 0.25 --batch-size 1 --save-limit 6"
+        f"{shlex.quote(sys.executable)} {shlex.quote(os.path.join(BASE_DIR, 'test.py'))} "
+        f"--sequence {args.sequence} --qp {args.qp} --fraction 1 "
+        "--batch-size 1 --save-limit 3 --full-frame-metrics"
     )
 
 
