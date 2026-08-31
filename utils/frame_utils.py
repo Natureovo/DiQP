@@ -11,9 +11,23 @@ def reorder_image(x):
     return x
 
 
-def calcPSNR(x, y, average=True):
+def _resolve_data_range(x, y, data_range=None):
+    if data_range is not None:
+        return float(data_range)
+
+    max_val = float(max(np.max(x), np.max(y)))
+    min_val = float(min(np.min(x), np.min(y)))
+    if min_val >= 0.0 and max_val <= 1.0 + 1e-6:
+        return 1.0
+    if min_val >= 0.0 and max_val <= 255.0 + 1e-6:
+        return 255.0
+    return max(max_val - min_val, 1.0)
+
+
+def calcPSNR(x, y, average=True, data_range=None):
     x = reorder_image(x)
     y = reorder_image(y)
+    data_range = _resolve_data_range(x, y, data_range)
 
 
     psnr_clip = 0.0
@@ -21,21 +35,21 @@ def calcPSNR(x, y, average=True):
     psnr_channel = 0.0
 
     for i,img in enumerate(x):
-        psnr_clip += psnr(img, y[i])
+        psnr_clip += psnr(img, y[i], data_range=data_range)
 
         for j,f in enumerate(img):
-            psnr_frame += psnr(f, y[i][j])
+            psnr_frame += psnr(f, y[i][j], data_range=data_range)
 
             for k,c in enumerate(f):
-                psnr_channel += psnr(c, y[i][j][k])
+                psnr_channel += psnr(c, y[i][j][k], data_range=data_range)
 
-    b,c,f,_,_ = x.shape
+    b,frame_count,channel_count,_,_ = x.shape
 
     
     if average:
         psnr_clip = psnr_clip/b 
-        psnr_frame = psnr_frame / (b*f)
-        psnr_channel = psnr_channel / (b*f*c)
+        psnr_frame = psnr_frame / (b*frame_count)
+        psnr_channel = psnr_channel / (b*frame_count*channel_count)
 
         psnr_avg = (psnr_clip+psnr_frame+psnr_channel)/3
 
@@ -48,10 +62,10 @@ def calcPSNR(x, y, average=True):
 
 
 
-def calculate_ssim(img1, img2, border=0):
+def calculate_ssim(img1, img2, border=0, data_range=None):
     '''calculate SSIM
     the same outputs as MATLAB's
-    img1, img2: [0, 255]
+    img1, img2: values in [0, data_range]
     '''
     #img1 = img1.squeeze()
     #img2 = img2.squeeze()
@@ -60,24 +74,25 @@ def calculate_ssim(img1, img2, border=0):
     h, w = img1.shape[:2]
     img1 = img1[border:h-border, border:w-border]
     img2 = img2[border:h-border, border:w-border]
+    data_range = _resolve_data_range(img1, img2, data_range)
 
     if img1.ndim == 2:
-        return ssim_(img1, img2)
+        return ssim_(img1, img2, data_range)
     elif img1.ndim == 3:
         if img1.shape[2] == 3:
             ssims = []
             for i in range(3):
-                ssims.append(ssim_(img1[:,:,i], img2[:,:,i]))
+                ssims.append(ssim_(img1[:,:,i], img2[:,:,i], data_range))
             return np.array(ssims).mean()
         elif img1.shape[2] == 1:
-            return ssim_(np.squeeze(img1), np.squeeze(img2))
+            return ssim_(np.squeeze(img1), np.squeeze(img2), data_range)
     else:
         raise ValueError('Wrong input image dimensions.')
 
 
-def ssim_(img1, img2):
-    C1 = (0.01 * 255)**2
-    C2 = (0.03 * 255)**2
+def ssim_(img1, img2, data_range=1.0):
+    C1 = (0.01 * data_range)**2
+    C2 = (0.03 * data_range)**2
 
     img1 = img1.astype(np.float64)
     img2 = img2.astype(np.float64)
@@ -97,7 +112,7 @@ def ssim_(img1, img2):
                                                             (sigma1_sq + sigma2_sq + C2))
     return ssim_map.mean()
 
-def batch_ssim(x,y, average=True, shape ='CF'):
+def batch_ssim(x,y, average=True, shape ='CF', data_range=None):
     if shape == 'CF':
         x = rearrange(x, 'b c f h w -> b f h w c')
         y = rearrange(y, 'b c f h w -> b f h w c')
@@ -106,6 +121,8 @@ def batch_ssim(x,y, average=True, shape ='CF'):
         y = rearrange(y, 'b f c h w -> b f h w c')
     else:
         raise ValueError('Wrong input image order.')
+
+    data_range = _resolve_data_range(x, y, data_range)
     
     b,f,_,_,c = x.shape
 
@@ -114,7 +131,7 @@ def batch_ssim(x,y, average=True, shape ='CF'):
     for i,clip in enumerate(x):
         ssim_clip = 0.0
         for j,frame in enumerate(clip):
-            ssim_clip += calculate_ssim(frame, y[i][j])
+            ssim_clip += calculate_ssim(frame, y[i][j], data_range=data_range)
         
         ssim_batch += ssim_clip/f
     

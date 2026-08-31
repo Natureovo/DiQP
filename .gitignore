@@ -1,0 +1,11 @@
+.idea/
+__pycache__/
+*.pyc
+
+data/
+testResults/
+visResults/
+report.csv
+report_v2.csv
+pretrained/*.pt
+*.mp4

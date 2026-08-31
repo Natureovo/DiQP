@@ -15,10 +15,18 @@ from einops import rearrange
 
 
 class myDataset(Dataset):
+    def _visible_window_origin(self):
+        max_offset_w = max(self.widthOrg - self.VisibleWindow['width'], 0)
+        max_offset_h = max(self.heightOrg - self.VisibleWindow['height'], 0)
+
+        if self.train:
+            return random.randint(0, max_offset_w), random.randint(0, max_offset_h)
+
+        return max_offset_w // 2, max_offset_h // 2
+
     def _loadImages(self,frameNos,seqNum,qp,step=50,count=1): #method for loading frames and put them into order since whe used threading for loading them.
-        frames = []
-        images = []
-        types= []
+        loaded = []
+        errors = []
 
         qpPath = os.path.join(self.qpPath,"{:03d}".format(seqNum),"QP-{}".format(str(qp)))
         rawPath = os.path.join(self.rawPath,"{:03d}".format(seqNum))
@@ -26,16 +34,15 @@ class myDataset(Dataset):
         def loadImage(*arg):
             file_name,frame,typ = arg
             image =cv2.imread(file_name)
+            if image is None:
+                errors.append(FileNotFoundError(f"Could not read image: {file_name}"))
+                return
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            frames.append(frame)
-            types.append(typ)
             if image.shape[2] == 4:
-                images.append(image[:,:,:3])
-            else:
-                images.append(image)
+                image = image[:,:,:3]
+            loaded.append((frame, typ, image))
 
-        offsetW = random.randint(0,(self.widthOrg - self.VisibleWindow['width']))
-        offsetH = random.randint(0,(self.heightOrg - self.VisibleWindow['height']))
+        offsetW, offsetH = self._visible_window_origin()
         left = offsetW
         right = offsetW + self.VisibleWindow['width']
         top = offsetH
@@ -47,13 +54,13 @@ class myDataset(Dataset):
             image_filename =os.path.join(qpPath,"{:03d}.png".format(f))
             imagesArg.append([image_filename,f,1])
 
-            image_filename =os.path.join(rawPath,"{:03d}_8K.png".format(f))
+            image_filename =os.path.join(rawPath,"{:03d}{}.png".format(f, self.rawFrameSuffix))
             imagesArg.append([image_filename,f,0])
         
-        if frameNos[1] < self.numOfFramesPerSeq - step:
-            lookahead = [frameNos[-1] + step * (i+1) for i in range(count) if frameNos[-1] + step * (i+1) < self.numOfFramesPerSeq-1 ]
-        else:
-            lookahead = [self.numOfFramesPerSeq -1]
+        lookahead = [
+            min(frameNos[-1] + step * (i + 1), self.numOfFramesPerSeq - 1)
+            for i in range(count)
+        ]
 
         for f in lookahead:
             image_filename =os.path.join(qpPath,"{:03d}.png".format(f)) 
@@ -67,11 +74,17 @@ class myDataset(Dataset):
         
         for thread in threads:
             thread.join()
-                                    
+
+        if errors:
+            raise errors[0]
+
+        frames = [item[0] for item in loaded]
+        types = [item[1] for item in loaded]
+        images = [item[2] for item in loaded]
         images = np.array(images)[:,top:bottom,left:right,:]
         
-        if len(images) != len(types) != len(frames) :
-            raise("Somthing missing!")
+        if len(images) != len(types) or len(images) != len(frames):
+            raise RuntimeError("Some input images are missing.")
                 
         frameNos = np.array(frameNos)
         lookahead = np.array(lookahead)
@@ -97,7 +110,7 @@ class myDataset(Dataset):
         elif extractingMethod == 'even':
             middle = [i-1 for i in range(0,numOfFrames,2) if i > 0]
         else:
-            raise("not supported yet -> full|even")
+            raise ValueError("extractingMethod must be 'full' or 'even'.")
         
         if self.train:
             if type(totalQualities) != list:
@@ -251,16 +264,23 @@ class myDataset(Dataset):
                 writer.writerow(field)
                 writer.writerow(index+res)
 
-    def __init__(self, seqNumbers,numOfFramesPerSeq,rawPath,qpPath,extractingMethod,frac,random_state,augmentation,train,totalQualities=100,cropSize=512,height=4320,width=8192,):
-        self.VisibleWindow = {'height':4096,'width':7680} #actual 8K resolution, sepe8k has bigger resolution
+    def __init__(self, seqNumbers,numOfFramesPerSeq,rawPath,qpPath,extractingMethod,frac,random_state,augmentation,train,totalQualities=100,cropSize=512,height=4320,width=8192,visibleHeight=4096,visibleWidth=7680,rawFrameSuffix="_8K"):
+        self.VisibleWindow = {'height':visibleHeight,'width':visibleWidth} # SEPE-8K keeps the original 4096x7680 default.
         self.seqNumbers = seqNumbers #list of consider videos for training
         self.numOfFramesPerSeq = numOfFramesPerSeq #number of frames per clip/video
         self.rawPath = rawPath #path for raw file
         self.qpPath = qpPath #path for encoded-decoded file
         self.widthOrg = width #size of clip/video's width
         self.heightOrg = height #size of clip/video's width
+        self.rawFrameSuffix = rawFrameSuffix
         self.frac = frac #fraction of data to be used for training
         self.cropSize = cropSize
+        if self.VisibleWindow['width'] > self.widthOrg or self.VisibleWindow['height'] > self.heightOrg:
+            raise ValueError("Visible window cannot be larger than the input frames.")
+        if self.VisibleWindow['width'] < self.cropSize or self.VisibleWindow['height'] < self.cropSize:
+            raise ValueError("Input frames must be at least as large as cropSize.")
+        if self.VisibleWindow['width'] % self.cropSize != 0 or self.VisibleWindow['height'] % self.cropSize != 0:
+            raise ValueError("Visible window dimensions must be divisible by cropSize.")
         self.random_state = random_state
         self.extractingMethod = extractingMethod
         self.totalQualities = totalQualities #number of steps/qualities/QP values

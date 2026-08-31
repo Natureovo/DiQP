@@ -1,0 +1,41 @@
+# LDV 快速测试
+
+本流程只取一个 LDV 视频的前 12 帧，先验证 HEVC QP 37 和预训练 DiQP 是否有效，避免一次拆解 200 个视频占满磁盘。
+
+## 1. 准备一小段数据
+
+在服务器 DiQP 项目根目录执行：
+
+```bash
+/home/cp/anaconda3/envs/diqp/bin/python prepare_ldv.py --input /home/cp/datasets/LDV1/training_raw/001.mkv --sequence 101 --qp 37 --frames 12
+```
+
+输出结构如下：
+
+```text
+data/Raw/101/000.png
+data/Encoded/101/QP-37/000.png
+data/Encoded/101/QP-37/qp_037.mp4
+```
+
+如果服务器的 `hevc_nvenc` 不可用，脚本会自动回退到 CPU `libx265`。
+
+## 2. 快速测试
+
+```bash
+/home/cp/anaconda3/envs/diqp/bin/python test.py --sequence 101 --qp 37 --fraction 0.25 --batch-size 1 --save-limit 6
+```
+
+结果写入 `report_v2.csv`。重点看 `PSNR Gain` 和 `SSIM Gain`：正数表示模型优于压缩输入，负数表示模型使结果变差。
+
+`testResults/comparison_*.png` 从左到右是 Encoded、Model、Raw；`difference_x5_*.png` 左侧是 Encoded 误差，右侧是 Model 误差，亮度经过 5 倍放大。
+
+## 3. 扩大测试
+
+快速流程确认无报错后，可去掉抽样：
+
+```bash
+/home/cp/anaconda3/envs/diqp/bin/python test.py --sequence 101 --qp 37 --fraction 1 --batch-size 1 --save-limit 12
+```
+
+需要测试其他 LDV 视频时使用新的序列号，例如将 `002.mkv` 对应到 `--sequence 102`，不要覆盖已有实验。
