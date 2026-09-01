@@ -445,7 +445,7 @@ def main():
                 "Resume checkpoint encoder differs from the split: "
                 f"{resume_encoder} vs {encoder}."
             )
-        if encoder == "hm" and (
+        if encoder.startswith("hm") and (
             resume.get("hm_encoder", "") != hm_encoder
             or resume.get("hm_config", "") != hm_config
             or int(resume.get("hm_padding", -1)) != hm_padding
@@ -530,7 +530,7 @@ def main():
     print(f"QPs / frames      : {qps} / {frames}")
     print(f"QP conditions     : {qp_conditions}")
     print(f"Encoder           : {encoder}")
-    if encoder == "hm":
+    if encoder.startswith("hm"):
         print(f"HM config         : {hm_config}")
         print(f"HM padding        : {hm_padding}")
     print(f"Train scope       : {args.train_scope}")

@@ -5,10 +5,17 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from fractions import Fraction
+
+from videoRelated.hm16_3_ldp import verify_package_encoder, write_ldp_config
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_HM16_3_ENCODER = os.environ.get(
+    "DIQP_HM16_3_ENCODER",
+    "/home/cp/tools/hm16_3/HM16.3-standard.exe",
+)
 DEFAULT_HM_ENCODER = os.environ.get(
     "DIQP_HM_ENCODER",
     "/home/cp/\u684c\u9762/yx/HM/bin/umake/gcc-9.4/x86_64/release/TAppEncoder",
@@ -36,9 +43,31 @@ def parse_args():
     )
     parser.add_argument(
         "--encoder",
-        choices=("hm", "hevc_nvenc", "libx265"),
-        default="hm",
-        help="HEVC encoder protocol. HM is the default standardized protocol.",
+        choices=("hm16_3_ldp", "hm", "hevc_nvenc", "libx265"),
+        default="hm16_3_ldp",
+        help="HEVC protocol. Defaults to the supplied HM 16.3 Low-Delay P package.",
+    )
+    parser.add_argument("--hm16-3-encoder", default=DEFAULT_HM16_3_ENCODER)
+    parser.add_argument(
+        "--hm16-3-runner",
+        choices=("auto", "direct", "wine"),
+        default="auto",
+        help="Run the package EXE directly on Windows or through Wine on Linux.",
+    )
+    parser.add_argument("--wine", default=os.environ.get("DIQP_WINE", "wine"))
+    parser.add_argument(
+        "--hm16-3-padding",
+        type=int,
+        default=8,
+        help="Pad input dimensions to this multiple, matching the package workflow.",
+    )
+    parser.add_argument(
+        "--hm16-3-work-root",
+        default=os.environ.get(
+            "DIQP_HM16_3_WORK_ROOT",
+            os.path.join(tempfile.gettempdir(), "diqp_hm16_3"),
+        ),
+        help="ASCII-only temporary directory used by the legacy Windows encoder.",
     )
     parser.add_argument("--hm-encoder", default=DEFAULT_HM_ENCODER)
     parser.add_argument("--hm-config", default=DEFAULT_HM_CONFIG)
@@ -66,12 +95,13 @@ def run(command):
     subprocess.run(command, check=True)
 
 
-def run_logged(command, log_path):
+def run_logged(command, log_path, cwd=None):
     print("Running:", " ".join(command))
     print(f"HM log         : {log_path}")
     with open(log_path, "w", encoding="utf8") as log_file:
         subprocess.run(
             command,
+            cwd=cwd,
             stdout=log_file,
             stderr=subprocess.STDOUT,
             check=True,
@@ -253,6 +283,177 @@ def hm_frame_rate(fps_value):
         raise ValueError(f"HM requires a valid frame rate, got: {fps_value}") from None
 
 
+def resolve_hm16_3_runner(args):
+    runner = args.hm16_3_runner
+    if runner == "auto":
+        runner = "direct" if os.name == "nt" else "wine"
+    if runner == "direct":
+        if os.name != "nt":
+            raise RuntimeError(
+                "HM16.3-standard.exe cannot run directly on Linux. Install Wine and "
+                "use --hm16-3-runner wine."
+            )
+        return runner, None
+
+    wine = shutil.which(args.wine)
+    if wine is None:
+        raise FileNotFoundError(
+            f"Cannot find Wine executable '{args.wine}'. The supplied encoder is a "
+            "32-bit Windows EXE, so the server needs Wine with 32-bit support."
+        )
+    return runner, wine
+
+
+def hm16_3_path(path, runner):
+    absolute = os.path.abspath(path)
+    if runner == "wine":
+        return "Z:" + absolute.replace("/", "\\")
+    return absolute
+
+
+def prepare_with_hm16_3_ldp(
+    args,
+    ffmpeg,
+    raw_pattern,
+    encoded_pattern,
+    encoded_dir,
+    frame_count,
+    fps_value,
+    source_size,
+):
+    encoder = os.path.abspath(args.hm16_3_encoder)
+    if not os.path.isfile(encoder):
+        raise FileNotFoundError(
+            "Cannot find the supplied HM16.3 encoder: " + encoder
+        )
+    encoder_sha256 = verify_package_encoder(encoder)
+    runner, wine = resolve_hm16_3_runner(args)
+    if args.hm16_3_padding < 2:
+        raise ValueError("--hm16-3-padding must be at least 2.")
+
+    source_width, source_height = source_size
+    coded_width = padded_size(source_width, args.hm16_3_padding)
+    coded_height = padded_size(source_height, args.hm16_3_padding)
+    frame_rate = hm_frame_rate(fps_value)
+    work_root = os.path.abspath(args.hm16_3_work_root)
+    os.makedirs(work_root, exist_ok=True)
+    work_dir = tempfile.mkdtemp(
+        prefix=f"seq{args.sequence:03d}_qp{args.qp}_",
+        dir=work_root,
+    )
+    print(f"HM16.3 work dir : {work_dir}")
+    input_yuv = os.path.join(work_dir, "input.yuv")
+    recon_yuv = os.path.join(work_dir, "recon.yuv")
+    temp_bitstream = os.path.join(work_dir, "stream.bin")
+    temp_config = os.path.join(work_dir, "hm16_3_ldp.cfg")
+    bitstream = os.path.join(encoded_dir, f"qp_{args.qp:03d}_hm16_3_ldp.bin")
+    archived_config = os.path.join(encoded_dir, "hm16_3_ldp.cfg")
+    log_path = os.path.join(encoded_dir, "hm16_3_ldp_encode.log")
+    protocol_path = os.path.join(encoded_dir, "encoding_protocol.txt")
+
+    print(f"Source size     : {source_width}x{source_height}")
+    print(f"HM16.3 size     : {coded_width}x{coded_height}")
+    print(f"HM16.3 FPS      : {frame_rate}")
+    print(f"HM16.3 runner   : {runner}")
+    print(f"HM16.3 SHA256   : {encoder_sha256}")
+    run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-y",
+            "-framerate",
+            fps_value,
+            "-start_number",
+            "0",
+            "-i",
+            raw_pattern,
+            "-frames:v",
+            str(frame_count),
+            "-vf",
+            f"pad={coded_width}:{coded_height}:0:0:black",
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "rawvideo",
+            input_yuv,
+        ]
+    )
+
+    write_ldp_config(
+        temp_config,
+        hm16_3_path(input_yuv, runner),
+        hm16_3_path(temp_bitstream, runner),
+        hm16_3_path(recon_yuv, runner),
+        frame_rate,
+        coded_width,
+        coded_height,
+        frame_count,
+        args.qp,
+    )
+    if runner == "wine":
+        hm_command = [wine, encoder, "-c", hm16_3_path(temp_config, runner)]
+    else:
+        hm_command = [encoder, "-c", temp_config]
+    run_logged(hm_command, log_path, cwd=work_dir)
+
+    if not os.path.isfile(temp_bitstream) or os.path.getsize(temp_bitstream) == 0:
+        raise RuntimeError(f"HM16.3 did not produce a bitstream. See: {log_path}")
+    expected_yuv_size = coded_width * coded_height * 3 // 2 * frame_count
+    if not os.path.isfile(recon_yuv) or os.path.getsize(recon_yuv) != expected_yuv_size:
+        actual_size = os.path.getsize(recon_yuv) if os.path.isfile(recon_yuv) else 0
+        raise RuntimeError(
+            "HM16.3 reconstructed YUV has an unexpected size: "
+            f"expected={expected_yuv_size}, actual={actual_size}. See: {log_path}"
+        )
+
+    shutil.copy2(temp_bitstream, bitstream)
+    shutil.copy2(temp_config, archived_config)
+    run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-y",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
+            "-video_size",
+            f"{coded_width}x{coded_height}",
+            "-framerate",
+            str(frame_rate),
+            "-i",
+            recon_yuv,
+            "-frames:v",
+            str(frame_count),
+            "-vf",
+            f"crop={source_width}:{source_height}:0:0",
+            "-vsync",
+            "0",
+            "-start_number",
+            "0",
+            encoded_pattern,
+        ]
+    )
+
+    with open(protocol_path, "w", encoding="utf8") as protocol_file:
+        protocol_file.write("encoder=HM16.3-standard.exe\n")
+        protocol_file.write("configuration=Low-Delay P supplied package\n")
+        protocol_file.write(f"encoder_path={encoder}\n")
+        protocol_file.write(f"encoder_sha256={encoder_sha256}\n")
+        protocol_file.write(f"runner={runner}\n")
+        protocol_file.write(f"config={os.path.abspath(archived_config)}\n")
+        protocol_file.write(f"qp={args.qp}\n")
+        protocol_file.write(f"frames={frame_count}\n")
+        protocol_file.write(f"source_size={source_width}x{source_height}\n")
+        protocol_file.write(f"coded_size={coded_width}x{coded_height}\n")
+        protocol_file.write(f"frame_rate={frame_rate}\n")
+        protocol_file.write(f"command={shlex.join(hm_command)}\n")
+
+    if not args.keep_hm_yuv:
+        shutil.rmtree(work_dir)
+    return bitstream
+
+
 def prepare_with_hm(
     args,
     ffmpeg,
@@ -380,6 +581,8 @@ def main():
         raise ValueError("--frames must be at least 3.")
     if args.sequence < 0 or args.qp < 0:
         raise ValueError("--sequence and --qp must be non-negative.")
+    if args.encoder in ("hm16_3_ldp", "hm") and args.qp > 51:
+        raise ValueError("HM encoders require --qp in [0, 51].")
 
     ffmpeg = find_working_ffmpeg()
     print(f"Using ffmpeg   : {ffmpeg}")
@@ -436,7 +639,18 @@ def main():
             f"{frame_count}; using all available frames."
         )
 
-    if args.encoder == "hm":
+    if args.encoder == "hm16_3_ldp":
+        compressed_output = prepare_with_hm16_3_ldp(
+            args,
+            ffmpeg,
+            raw_pattern,
+            encoded_pattern,
+            encoded_dir,
+            frame_count,
+            fps_value,
+            source_size,
+        )
+    elif args.encoder == "hm":
         compressed_output = prepare_with_hm(
             args,
             ffmpeg,

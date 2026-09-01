@@ -1,6 +1,9 @@
 .idea/
 __pycache__/
 *.pyc
+.tmp_*/
+*.exe
+*.rar
 
 data/
 testResults/

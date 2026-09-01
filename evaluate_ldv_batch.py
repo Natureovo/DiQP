@@ -8,6 +8,10 @@ from statistics import mean
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_HM16_3_ENCODER = os.environ.get(
+    "DIQP_HM16_3_ENCODER",
+    "/home/cp/tools/hm16_3/HM16.3-standard.exe",
+)
 DEFAULT_HM_ENCODER = os.environ.get(
     "DIQP_HM_ENCODER",
     "/home/cp/\u684c\u9762/yx/HM/bin/umake/gcc-9.4/x86_64/release/TAppEncoder",
@@ -47,8 +51,20 @@ def parse_args():
     )
     parser.add_argument(
         "--encoder",
-        choices=("hm", "hevc_nvenc", "libx265"),
-        default="hm",
+        choices=("hm16_3_ldp", "hm", "hevc_nvenc", "libx265"),
+        default="hm16_3_ldp",
+    )
+    parser.add_argument("--hm16-3-encoder", default=DEFAULT_HM16_3_ENCODER)
+    parser.add_argument(
+        "--hm16-3-runner",
+        choices=("auto", "direct", "wine"),
+        default="auto",
+    )
+    parser.add_argument("--wine", default=os.environ.get("DIQP_WINE", "wine"))
+    parser.add_argument("--hm16-3-padding", type=int, default=8)
+    parser.add_argument(
+        "--hm16-3-work-root",
+        default=os.environ.get("DIQP_HM16_3_WORK_ROOT", "/tmp/diqp_hm16_3"),
     )
     parser.add_argument("--hm-encoder", default=DEFAULT_HM_ENCODER)
     parser.add_argument("--hm-config", default=DEFAULT_HM_CONFIG)
@@ -189,6 +205,17 @@ def main():
                 "Cannot resume an evaluation with a different encoder: "
                 f"original={original_encoder}, requested={args.encoder}"
             )
+        if args.encoder == "hm16_3_ldp":
+            original_executable = original_protocol.get("hm16_3_encoder")
+            requested_executable = args.hm16_3_encoder
+            if (
+                original_executable is not None
+                and original_executable != requested_executable
+            ):
+                raise ValueError(
+                    "Cannot resume with a different HM16.3 package executable: "
+                    f"original={original_executable}, requested={requested_executable}"
+                )
         protocol_name = f"resume_{timestamp}.txt"
     else:
         run_dir = os.path.join(args.run_root, f"ldv_{timestamp}")
@@ -280,6 +307,16 @@ def main():
                 str(args.frames),
                 "--encoder",
                 args.encoder,
+                "--hm16-3-encoder",
+                args.hm16_3_encoder,
+                "--hm16-3-runner",
+                args.hm16_3_runner,
+                "--wine",
+                args.wine,
+                "--hm16-3-padding",
+                str(args.hm16_3_padding),
+                "--hm16-3-work-root",
+                args.hm16_3_work_root,
                 "--hm-encoder",
                 args.hm_encoder,
                 "--hm-config",

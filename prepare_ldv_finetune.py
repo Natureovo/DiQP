@@ -7,6 +7,10 @@ import sys
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_HM16_3_ENCODER = os.environ.get(
+    "DIQP_HM16_3_ENCODER",
+    "/home/cp/tools/hm16_3/HM16.3-standard.exe",
+)
 DEFAULT_HM_ENCODER = os.environ.get(
     "DIQP_HM_ENCODER",
     "/home/cp/\u684c\u9762/yx/HM/bin/umake/gcc-9.4/x86_64/release/TAppEncoder",
@@ -52,8 +56,20 @@ def parse_args():
     parser.add_argument("--frames", type=int, default=120)
     parser.add_argument(
         "--encoder",
-        choices=("hm", "hevc_nvenc", "libx265"),
-        default="hm",
+        choices=("hm16_3_ldp", "hm", "hevc_nvenc", "libx265"),
+        default="hm16_3_ldp",
+    )
+    parser.add_argument("--hm16-3-encoder", default=DEFAULT_HM16_3_ENCODER)
+    parser.add_argument(
+        "--hm16-3-runner",
+        choices=("auto", "direct", "wine"),
+        default="auto",
+    )
+    parser.add_argument("--wine", default=os.environ.get("DIQP_WINE", "wine"))
+    parser.add_argument("--hm16-3-padding", type=int, default=8)
+    parser.add_argument(
+        "--hm16-3-work-root",
+        default=os.environ.get("DIQP_HM16_3_WORK_ROOT", "/tmp/diqp_hm16_3"),
     )
     parser.add_argument("--hm-encoder", default=DEFAULT_HM_ENCODER)
     parser.add_argument("--hm-config", default=DEFAULT_HM_CONFIG)
@@ -88,6 +104,22 @@ def load_marker(path):
         return json.load(marker_file)
 
 
+def hm_protocol_values(args):
+    if args.encoder == "hm16_3_ldp":
+        return (
+            os.path.abspath(args.hm16_3_encoder),
+            "python-generated supplied-package Low-Delay P",
+            args.hm16_3_padding,
+        )
+    if args.encoder == "hm":
+        return (
+            os.path.abspath(args.hm_encoder),
+            os.path.abspath(args.hm_config),
+            args.hm_padding,
+        )
+    return "", "", 0
+
+
 def prepared_pair(
     output_root,
     source,
@@ -98,6 +130,8 @@ def prepared_pair(
     hm_encoder,
     hm_config,
     hm_padding,
+    hm16_3_runner,
+    wine,
 ):
     marker = load_marker(marker_path(output_root, sequence, qp))
     if marker is None:
@@ -109,10 +143,15 @@ def prepared_pair(
         or marker.get("encoder") != encoder
     ):
         return None
-    if encoder == "hm" and (
-        marker.get("hm_encoder") != os.path.abspath(hm_encoder)
-        or marker.get("hm_config") != os.path.abspath(hm_config)
+    if encoder.startswith("hm") and (
+        marker.get("hm_encoder") != hm_encoder
+        or marker.get("hm_config") != hm_config
         or int(marker.get("hm_padding", -1)) != hm_padding
+    ):
+        return None
+    if encoder == "hm16_3_ldp" and (
+        marker.get("hm16_3_runner") != hm16_3_runner
+        or marker.get("wine") != wine
     ):
         return None
 
@@ -135,6 +174,7 @@ def prepare_pair(args, split, video_id, qp):
     if not os.path.isfile(source):
         raise FileNotFoundError(f"Cannot find LDV source video: {source}")
 
+    hm_encoder, hm_config, hm_padding = hm_protocol_values(args)
     if not args.overwrite:
         actual_frames = prepared_pair(
             args.output_root,
@@ -143,9 +183,11 @@ def prepare_pair(args, split, video_id, qp):
             qp,
             args.frames,
             args.encoder,
-            args.hm_encoder,
-            args.hm_config,
-            args.hm_padding,
+            hm_encoder,
+            hm_config,
+            hm_padding,
+            args.hm16_3_runner,
+            args.wine,
         )
         if actual_frames is not None:
             print(
@@ -169,6 +211,16 @@ def prepare_pair(args, split, video_id, qp):
         str(args.frames),
         "--encoder",
         args.encoder,
+        "--hm16-3-encoder",
+        args.hm16_3_encoder,
+        "--hm16-3-runner",
+        args.hm16_3_runner,
+        "--wine",
+        args.wine,
+        "--hm16-3-padding",
+        str(args.hm16_3_padding),
+        "--hm16-3-work-root",
+        args.hm16_3_work_root,
         "--hm-encoder",
         args.hm_encoder,
         "--hm-config",
@@ -203,9 +255,11 @@ def prepare_pair(args, split, video_id, qp):
         "requested_frames": args.frames,
         "actual_frames": raw_count,
         "encoder": args.encoder,
-        "hm_encoder": os.path.abspath(args.hm_encoder) if args.encoder == "hm" else "",
-        "hm_config": os.path.abspath(args.hm_config) if args.encoder == "hm" else "",
-        "hm_padding": args.hm_padding if args.encoder == "hm" else 0,
+        "hm_encoder": hm_encoder,
+        "hm_config": hm_config,
+        "hm_padding": hm_padding,
+        "hm16_3_runner": args.hm16_3_runner if args.encoder == "hm16_3_ldp" else "",
+        "wine": args.wine if args.encoder == "hm16_3_ldp" else "",
     }
     path = marker_path(args.output_root, video_id, qp)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -218,13 +272,15 @@ def main():
     args = parse_args()
     if args.frames < 3:
         raise ValueError("--frames must be at least 3.")
-    if not args.qps or any(qp < 0 or qp > 255 for qp in args.qps):
-        raise ValueError("--qps must contain values in [0, 255].")
+    max_qp = 51 if args.encoder.startswith("hm") else 255
+    if not args.qps or any(qp < 0 or qp > max_qp for qp in args.qps):
+        raise ValueError(f"--qps must contain values in [0, {max_qp}].")
     overlap = sorted(set(args.train_ids) & set(args.val_ids))
     if overlap:
         raise ValueError(f"Train and validation IDs overlap: {overlap}")
 
     os.makedirs(args.output_root, exist_ok=True)
+    hm_encoder, hm_config, hm_padding = hm_protocol_values(args)
     rows = []
     for split, video_ids in (("train", args.train_ids), ("val", args.val_ids)):
         for video_id in video_ids:
@@ -243,9 +299,9 @@ def main():
                         args.frames,
                         actual_frames,
                         args.encoder,
-                        os.path.abspath(args.hm_encoder) if args.encoder == "hm" else "",
-                        os.path.abspath(args.hm_config) if args.encoder == "hm" else "",
-                        args.hm_padding if args.encoder == "hm" else 0,
+                        hm_encoder,
+                        hm_config,
+                        hm_padding,
                     ]
                 )
 
