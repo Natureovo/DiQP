@@ -1,0 +1,192 @@
+import argparse
+import csv
+import json
+import os
+import subprocess
+import sys
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Prepare a small fixed LDV split for DiQP fine-tuning."
+    )
+    parser.add_argument(
+        "--ldv-dir",
+        default="/home/cp/datasets/LDV1/training_raw",
+    )
+    parser.add_argument(
+        "--output-root",
+        default=os.path.join(BASE_DIR, "data", "LDV_finetune"),
+    )
+    parser.add_argument(
+        "--train-ids",
+        type=int,
+        nargs="+",
+        default=list(range(21, 31)),
+    )
+    parser.add_argument("--val-ids", type=int, nargs="+", default=[31, 32, 33])
+    parser.add_argument("--qp", type=int, default=42)
+    parser.add_argument("--frames", type=int, default=120)
+    parser.add_argument(
+        "--encoder",
+        choices=("hevc_nvenc", "libx265"),
+        default="hevc_nvenc",
+    )
+    parser.add_argument("--fps", type=float, default=None)
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Regenerate pairs even when a matching completion marker exists.",
+    )
+    return parser.parse_args()
+
+
+def count_png_files(directory):
+    if not os.path.isdir(directory):
+        return 0
+    return sum(name.lower().endswith(".png") for name in os.listdir(directory))
+
+
+def marker_path(output_root, sequence, qp):
+    return os.path.join(output_root, ".prepared", f"{sequence:03d}_QP-{qp}.json")
+
+
+def load_marker(path):
+    if not os.path.isfile(path):
+        return None
+    with open(path, "r", encoding="utf8") as marker_file:
+        return json.load(marker_file)
+
+
+def prepared_pair(output_root, source, sequence, qp, requested_frames):
+    marker = load_marker(marker_path(output_root, sequence, qp))
+    if marker is None:
+        return None
+    if (
+        marker.get("source") != os.path.abspath(source)
+        or int(marker.get("qp", -1)) != qp
+        or int(marker.get("requested_frames", -1)) != requested_frames
+    ):
+        return None
+
+    raw_dir = os.path.join(output_root, "Raw", f"{sequence:03d}")
+    encoded_dir = os.path.join(
+        output_root, "Encoded", f"{sequence:03d}", f"QP-{qp}"
+    )
+    actual_frames = int(marker.get("actual_frames", 0))
+    if (
+        actual_frames >= 3
+        and count_png_files(raw_dir) == actual_frames
+        and count_png_files(encoded_dir) == actual_frames
+    ):
+        return actual_frames
+    return None
+
+
+def prepare_pair(args, split, video_id):
+    source = os.path.join(args.ldv_dir, f"{video_id:03d}.mkv")
+    if not os.path.isfile(source):
+        raise FileNotFoundError(f"Cannot find LDV source video: {source}")
+
+    if not args.overwrite:
+        actual_frames = prepared_pair(
+            args.output_root, source, video_id, args.qp, args.frames
+        )
+        if actual_frames is not None:
+            print(
+                f"Skipping prepared {split} video {video_id:03d}: "
+                f"{actual_frames} frames"
+            )
+            return actual_frames
+
+    command = [
+        sys.executable,
+        os.path.join(BASE_DIR, "prepare_ldv.py"),
+        "--input",
+        source,
+        "--output-root",
+        args.output_root,
+        "--sequence",
+        str(video_id),
+        "--qp",
+        str(args.qp),
+        "--frames",
+        str(args.frames),
+        "--encoder",
+        args.encoder,
+        "--overwrite",
+    ]
+    if args.fps is not None:
+        command.extend(["--fps", str(args.fps)])
+
+    print(f"\nPreparing {split} video {video_id:03d}", flush=True)
+    subprocess.run(command, cwd=BASE_DIR, check=True)
+
+    raw_dir = os.path.join(args.output_root, "Raw", f"{video_id:03d}")
+    encoded_dir = os.path.join(
+        args.output_root, "Encoded", f"{video_id:03d}", f"QP-{args.qp}"
+    )
+    raw_count = count_png_files(raw_dir)
+    encoded_count = count_png_files(encoded_dir)
+    if raw_count < 3 or raw_count != encoded_count:
+        raise RuntimeError(
+            f"Prepared pair is not aligned for {video_id:03d}: "
+            f"Raw={raw_count}, Encoded={encoded_count}."
+        )
+
+    marker = {
+        "source": os.path.abspath(source),
+        "split": split,
+        "sequence": video_id,
+        "qp": args.qp,
+        "requested_frames": args.frames,
+        "actual_frames": raw_count,
+    }
+    path = marker_path(args.output_root, video_id, args.qp)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf8") as marker_file:
+        json.dump(marker, marker_file, indent=2)
+    return raw_count
+
+
+def main():
+    args = parse_args()
+    if args.frames < 3:
+        raise ValueError("--frames must be at least 3.")
+    if args.qp < 0:
+        raise ValueError("--qp must be non-negative.")
+    overlap = sorted(set(args.train_ids) & set(args.val_ids))
+    if overlap:
+        raise ValueError(f"Train and validation IDs overlap: {overlap}")
+
+    os.makedirs(args.output_root, exist_ok=True)
+    rows = []
+    for split, video_ids in (("train", args.train_ids), ("val", args.val_ids)):
+        for video_id in video_ids:
+            actual_frames = prepare_pair(args, split, video_id)
+            if actual_frames < args.frames:
+                raise RuntimeError(
+                    f"Video {video_id:03d} has only {actual_frames} frames, fewer than "
+                    f"the fixed training length {args.frames}. Choose a smaller --frames value."
+                )
+            rows.append([video_id, split, args.qp, args.frames, actual_frames])
+
+    split_path = os.path.join(args.output_root, "split.csv")
+    with open(split_path, "w", encoding="utf8", newline="") as split_file:
+        writer = csv.writer(split_file)
+        writer.writerow(["Sequence", "Split", "QP", "Frames Used", "Frames Available"])
+        writer.writerows(rows)
+
+    print("\nLDV fine-tuning data is ready")
+    print(f"Train videos   : {len(args.train_ids)}")
+    print(f"Val videos     : {len(args.val_ids)}")
+    print(f"QP / frames    : {args.qp} / {args.frames}")
+    print(f"Data root      : {args.output_root}")
+    print(f"Split manifest : {split_path}")
+
+
+if __name__ == "__main__":
+    main()

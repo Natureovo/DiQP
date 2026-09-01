@@ -6,6 +6,7 @@ data/
 testResults/
 visResults/
 batchResults/
+runs/
 report.csv
 report_v2.csv
 pretrained/*.pt

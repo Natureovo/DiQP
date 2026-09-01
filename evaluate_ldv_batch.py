@@ -40,6 +40,10 @@ def parse_args():
     parser.add_argument("--output-root", default=os.path.join(BASE_DIR, "data"))
     parser.add_argument("--run-root", default=os.path.join(BASE_DIR, "batchResults"))
     parser.add_argument(
+        "--model-path",
+        default=os.path.join(BASE_DIR, "pretrained", "checkpoint_HEVC.pt"),
+    )
+    parser.add_argument(
         "--resume-run",
         default=None,
         help="Existing run directory; completed Sequence/QP pairs are skipped.",
@@ -142,6 +146,8 @@ def main():
         raise ValueError("--fraction must be greater than 0 and no greater than 1.")
     if args.metric_mode == "full-frame" and args.fraction != 1:
         raise ValueError("Full-frame metrics require --fraction 1 for complete coverage.")
+    if not os.path.isfile(args.model_path):
+        raise FileNotFoundError(f"Model checkpoint does not exist: {args.model_path}")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if args.resume_run is not None:
@@ -162,6 +168,15 @@ def main():
             protocol_file.write(f"{key}={value}\n")
 
     existing_rows = read_metrics(metrics_path) if os.path.isfile(metrics_path) else []
+    expected_model = os.path.abspath(args.model_path)
+    existing_models = {
+        os.path.abspath(row["Model"]) for row in existing_rows
+    }
+    if existing_models and existing_models != {expected_model}:
+        raise ValueError(
+            "Cannot resume into metrics produced by a different model: "
+            f"{sorted(existing_models)}"
+        )
     completed_pairs = {
         (int(row["Sequence"]), int(row["QP"])) for row in existing_rows
     }
@@ -255,6 +270,8 @@ def main():
                 result_dir,
                 "--report",
                 metrics_path,
+                "--model-path",
+                args.model_path,
             ]
             if args.metric_mode == "full-frame":
                 test_command.append("--full-frame-metrics")
