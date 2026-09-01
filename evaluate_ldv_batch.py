@@ -32,7 +32,7 @@ def parse_args():
         "--qps",
         type=int,
         nargs="+",
-        default=[22, 27, 32, 37, 42],
+        default=[22, 27, 32, 37, 42, 51],
     )
     parser.add_argument("--start-sequence", type=int, default=101)
     parser.add_argument("--frames", type=int, default=60)

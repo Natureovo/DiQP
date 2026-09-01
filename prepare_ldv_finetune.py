@@ -40,8 +40,8 @@ def parse_args():
         "--qps",
         type=int,
         nargs="+",
-        default=[22, 27, 32, 37, 42],
-        help="HM QPs to prepare. Defaults to the common multi-QP benchmark set.",
+        default=[22, 27, 32, 37, 42, 51],
+        help="HM QPs to prepare. Defaults to the common benchmark set plus QP 51.",
     )
     parser.add_argument(
         "--qp",

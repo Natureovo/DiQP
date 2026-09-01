@@ -56,10 +56,10 @@ HM 是 CPU 参考编码器，速度会明显慢于 `hevc_nvenc`。如需重跑�
 
 `512×512` 是预训练模型固定的输入块大小，不是最终评价窗口。整帧模式会把所有重叠块加权拼回原始分辨率，并让每个视频帧只参与一次最终统计。整帧模式必须使用 `--fraction 1`，否则无法覆盖完整画面。
 
-下面的命令自动测试前 5 个 LDV 视频，每个视频使用 HM 测试标准多 QP 集合 22、27、32、37、42。默认将重叠的 512×512 预测加权拼回完整帧，再计算 RGB-PSNR、Y-PSNR 和 SSIM：
+下面的命令自动测试前 5 个 LDV 视频，每个视频使用 HM 测试多 QP 集合 22、27、32、37、42、51；前五档是常用视频增强基准设置，QP 51 对应 DiQP 的 HEVC 最大强压缩档。默认将重叠的 512×512 预测加权拼回完整帧，再计算 RGB-PSNR、Y-PSNR 和 SSIM：
 
 ```bash
-/home/cp/anaconda3/envs/diqp/bin/python evaluate_ldv_batch.py --video-ids 1 2 3 4 5 --qps 22 27 32 37 42 --frames 60 --fraction 1 --batch-size 1 --save-limit 2
+/home/cp/anaconda3/envs/diqp/bin/python evaluate_ldv_batch.py --video-ids 1 2 3 4 5 --qps 22 27 32 37 42 51 --frames 60 --fraction 1 --batch-size 1 --save-limit 2
 ```
 
 首次切换到 HM 前，可以删除 DiQP 临时 NVENC 帧数据；不要删除 `batchResults`、`runs`、`pretrained` 或 `modelone/dataset/hm_results`：
@@ -84,10 +84,10 @@ rm -rf -- /home/cp/桌面/yx/DiQP/data/LDV_finetune
 
 ## 5. HM 多 QP 微调
 
-训练集固定使用 LDV 021–030，验证集使用 031–033；测试集保留 001–020，三者不重叠。默认准备 QP 22、27、32、37、42，每个视频 120 帧，并支持通过 `.prepared` 标记断点续做：
+训练集固定使用 LDV 021–030，验证集使用 031–033；测试集保留 001–020，三者不重叠。默认准备 QP 22、27、32、37、42、51，每个视频 120 帧，并支持通过 `.prepared` 标记断点续做：
 
 ```bash
-/home/cp/anaconda3/envs/diqp/bin/python prepare_ldv_finetune.py --qps 22 27 32 37 42 --frames 120 --encoder hm
+/home/cp/anaconda3/envs/diqp/bin/python prepare_ldv_finetune.py --qps 22 27 32 37 42 51 --frames 120 --encoder hm
 ```
 
 准备完成后先进行两步 decoder 冒烟训练：
