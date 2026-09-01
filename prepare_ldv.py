@@ -218,6 +218,17 @@ def main():
     )
     run(extract_command)
 
+    frame_count = count_png_files(raw_dir)
+    if frame_count < 3:
+        raise RuntimeError(
+            f"The source produced only {frame_count} frames; at least 3 are required."
+        )
+    if frame_count < args.frames:
+        print(
+            f"Requested {args.frames} frames, but the source contains only "
+            f"{frame_count}; using all available frames."
+        )
+
     encode_command = [
         ffmpeg,
         "-hide_banner",
@@ -229,7 +240,7 @@ def main():
         "-i",
         raw_pattern,
         "-frames:v",
-        str(args.frames),
+        str(frame_count),
         *encoder_options(args.encoder, args.qp),
         compressed_video,
     ]
@@ -250,7 +261,7 @@ def main():
             "-i",
             raw_pattern,
             "-frames:v",
-            str(args.frames),
+            str(frame_count),
             *encoder_options("libx265", args.qp),
             compressed_video,
         ]
@@ -268,7 +279,7 @@ def main():
             "-vsync",
             "0",
             "-frames:v",
-            str(args.frames),
+            str(frame_count),
             "-start_number",
             "0",
             encoded_pattern,
@@ -277,10 +288,10 @@ def main():
 
     raw_count = count_png_files(raw_dir)
     encoded_count = count_png_files(encoded_dir)
-    if raw_count != args.frames or encoded_count != args.frames:
+    if raw_count != frame_count or encoded_count != frame_count:
         raise RuntimeError(
             f"Frame preparation is incomplete: Raw={raw_count}, Encoded={encoded_count}, "
-            f"expected={args.frames}."
+            f"expected={frame_count}."
         )
 
     print("LDV preparation finished")

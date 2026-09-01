@@ -57,3 +57,9 @@ data/Encoded/101/QP-37/qp_037.mp4
 ```
 
 每次运行都会在 `batchResults/ldv_时间戳/` 下创建独立目录。`metrics.csv` 保存每个视频的完整帧结果，`summary.csv` 保存总体和分 QP 平均结果，`visuals/` 保存完整帧对比图和逐帧指标，`protocol.txt` 记录本次参数。单个组合失败时脚本默认记录到 `failures.csv` 并继续执行后续组合。
+
+`--frames` 是最多抽取的帧数。如果某个源视频不足该数量，脚本会自动使用它的全部可用帧。批量任务中断或部分组合失败后，可以在原目录断点续跑；已有 `Sequence/QP` 指标会被跳过，只执行缺失组合并重新生成汇总：
+
+```bash
+/home/cp/anaconda3/envs/diqp/bin/python evaluate_ldv_batch.py --video-ids 1 2 3 4 5 --qps 42 --frames 200 --fraction 1 --batch-size 1 --save-limit 2 --resume-run /home/cp/桌面/yx/DiQP/batchResults/ldv_20260901_093450
+```

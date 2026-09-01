@@ -40,6 +40,11 @@ def parse_args():
     parser.add_argument("--output-root", default=os.path.join(BASE_DIR, "data"))
     parser.add_argument("--run-root", default=os.path.join(BASE_DIR, "batchResults"))
     parser.add_argument(
+        "--resume-run",
+        default=None,
+        help="Existing run directory; completed Sequence/QP pairs are skipped.",
+    )
+    parser.add_argument(
         "--stop-on-error",
         action="store_true",
         help="Stop immediately instead of recording a failed video/QP and continuing.",
@@ -123,8 +128,6 @@ def write_summary(path, rows):
 
 
 def write_failures(path, failures):
-    if not failures:
-        return
     with open(path, "w", encoding="utf8", newline="") as failure_file:
         writer = csv.writer(failure_file)
         writer.writerow(["Video", "Sequence", "QP", "Error"])
@@ -140,43 +143,73 @@ def main():
     if args.metric_mode == "full-frame" and args.fraction != 1:
         raise ValueError("Full-frame metrics require --fraction 1 for complete coverage.")
 
-    run_id = datetime.now().strftime("ldv_%Y%m%d_%H%M%S")
-    run_dir = os.path.join(args.run_root, run_id)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if args.resume_run is not None:
+        run_dir = os.path.abspath(args.resume_run)
+        if not os.path.isdir(run_dir):
+            raise FileNotFoundError(f"Resume run directory does not exist: {run_dir}")
+        protocol_name = f"resume_{timestamp}.txt"
+    else:
+        run_dir = os.path.join(args.run_root, f"ldv_{timestamp}")
+        os.makedirs(run_dir, exist_ok=False)
+        protocol_name = "protocol.txt"
+
     metrics_path = os.path.join(run_dir, "metrics.csv")
     summary_path = os.path.join(run_dir, "summary.csv")
     failures_path = os.path.join(run_dir, "failures.csv")
-    os.makedirs(run_dir, exist_ok=False)
-    with open(os.path.join(run_dir, "protocol.txt"), "w", encoding="utf8") as protocol_file:
+    with open(os.path.join(run_dir, protocol_name), "w", encoding="utf8") as protocol_file:
         for key, value in sorted(vars(args).items()):
             protocol_file.write(f"{key}={value}\n")
+
+    existing_rows = read_metrics(metrics_path) if os.path.isfile(metrics_path) else []
+    completed_pairs = {
+        (int(row["Sequence"]), int(row["QP"])) for row in existing_rows
+    }
 
     prepare_script = os.path.join(BASE_DIR, "prepare_ldv.py")
     test_script = os.path.join(BASE_DIR, "test.py")
     failures = []
-    total_runs = len(args.video_ids) * len(args.qps)
+    planned_pairs = [
+        (video_id, args.start_sequence + video_offset, qp)
+        for video_offset, video_id in enumerate(args.video_ids)
+        for qp in args.qps
+    ]
+    remaining_runs = sum(
+        (sequence, qp) not in completed_pairs
+        for _, sequence, qp in planned_pairs
+    )
 
     print(f"Run directory  : {run_dir}")
     print(f"Videos         : {args.video_ids}")
     print(f"QP values      : {args.qps}")
-    print(f"Planned runs   : {total_runs}")
+    print(f"Completed runs : {len(completed_pairs)}")
+    print(f"Remaining runs : {remaining_runs}")
 
-    completed = 0
+    run_number = 0
     for video_offset, video_id in enumerate(args.video_ids):
         sequence = args.start_sequence + video_offset
         input_video = os.path.join(args.ldv_dir, f"{video_id:03d}.mkv")
         if not os.path.isfile(input_video):
             error = f"Input video does not exist: {input_video}"
             for qp in args.qps:
-                failures.append([video_id, sequence, qp, error])
+                if (sequence, qp) not in completed_pairs:
+                    failures.append([video_id, sequence, qp, error])
             if args.stop_on_error:
                 raise FileNotFoundError(error)
             print(error)
             continue
 
         for qp in args.qps:
-            completed += 1
+            if (sequence, qp) in completed_pairs:
+                print(
+                    f"Skipping completed run: video {video_id:03d}, "
+                    f"sequence {sequence:03d}, QP {qp}"
+                )
+                continue
+
+            run_number += 1
             print(
-                f"\n=== Run {completed}/{total_runs}: video {video_id:03d}, "
+                f"\n=== Remaining run {run_number}/{remaining_runs}: video {video_id:03d}, "
                 f"sequence {sequence:03d}, QP {qp} ==="
             )
             result_dir = os.path.join(
