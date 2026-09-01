@@ -87,14 +87,23 @@ def read_split(path):
 
     qps = {int(row["QP"]) for row in rows}
     frame_counts = {int(row["Frames Used"]) for row in rows}
+    encoders = {row.get("Encoder", "unknown") or "unknown" for row in rows}
     if len(qps) != 1 or len(frame_counts) != 1:
         raise ValueError("Pilot fine-tuning requires one QP and one fixed frame count.")
+    if len(encoders) != 1:
+        raise ValueError(f"Split manifest mixes encoder protocols: {sorted(encoders)}")
 
     train_sequences = [int(row["Sequence"]) for row in rows if row["Split"] == "train"]
     val_sequences = [int(row["Sequence"]) for row in rows if row["Split"] == "val"]
     if not train_sequences or not val_sequences:
         raise ValueError("Split manifest must contain train and val sequences.")
-    return train_sequences, val_sequences, qps.pop(), frame_counts.pop()
+    return (
+        train_sequences,
+        val_sequences,
+        qps.pop(),
+        frame_counts.pop(),
+        encoders.pop(),
+    )
 
 
 def detect_geometry(data_root, sequence):
@@ -246,7 +255,7 @@ def main():
     set_seed(SEED)
     device = torch.device("cuda")
     split_path = args.split_file or os.path.join(args.data_root, "split.csv")
-    train_sequences, val_sequences, qp, frames = read_split(split_path)
+    train_sequences, val_sequences, qp, frames, encoder = read_split(split_path)
     width, height, raw_suffix = detect_geometry(args.data_root, train_sequences[0])
     if width < 512 or height < 512:
         raise RuntimeError(f"Frames are too small for DiQP: {width}x{height}")
@@ -343,6 +352,12 @@ def main():
             )
         if int(resume.get("qp", -1)) != qp or int(resume.get("frames", -1)) != frames:
             raise ValueError("Resume checkpoint QP/frame settings differ from the split.")
+        resume_encoder = resume.get("encoder", "unknown")
+        if resume_encoder != encoder:
+            raise ValueError(
+                "Resume checkpoint encoder differs from the split: "
+                f"{resume_encoder} vs {encoder}."
+            )
         model.load_state_dict(checkpoint_state_dict(resume), strict=True)
         optimizer.load_state_dict(resume["optimizer"])
         scheduler.load_state_dict(resume["scheduler"])
@@ -369,6 +384,7 @@ def main():
         "val_sequences": val_sequences,
         "qp": qp,
         "frames": frames,
+        "encoder": encoder,
         "resolution": f"{width}x{height}",
     }
     with open(os.path.join(output_dir, "config.json"), "w", encoding="utf8") as file:
@@ -399,6 +415,7 @@ def main():
     print(f"Train / val videos: {len(train_sequences)} / {len(val_sequences)}")
     print(f"Train / val samples: {len(trainset)} / {len(valset)}")
     print(f"QP / frames       : {qp} / {frames}")
+    print(f"Encoder           : {encoder}")
     print(f"Train scope       : {args.train_scope}")
     print(f"Parameters        : {trainable_parameters:,} trainable / {total_parameters:,}")
     print(f"Output directory  : {output_dir}")
@@ -413,6 +430,7 @@ def main():
             "train_scope": args.train_scope,
             "qp": qp,
             "frames": frames,
+            "encoder": encoder,
         }
         save_checkpoint(
             os.path.join(output_dir, "best.pt"),
@@ -478,6 +496,7 @@ def main():
             "train_scope": args.train_scope,
             "qp": qp,
             "frames": frames,
+            "encoder": encoder,
         }
         save_checkpoint(
             os.path.join(output_dir, "last.pt"),

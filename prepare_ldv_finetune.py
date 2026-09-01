@@ -7,6 +7,14 @@ import sys
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_HM_ENCODER = os.environ.get(
+    "DIQP_HM_ENCODER",
+    "/home/cp/\u684c\u9762/yx/HM/bin/umake/gcc-9.4/x86_64/release/TAppEncoder",
+)
+DEFAULT_HM_CONFIG = os.environ.get(
+    "DIQP_HM_CONFIG",
+    "/home/cp/\u684c\u9762/yx/HM/cfg/encoder_randomaccess_main.cfg",
+)
 
 
 def parse_args():
@@ -32,9 +40,12 @@ def parse_args():
     parser.add_argument("--frames", type=int, default=120)
     parser.add_argument(
         "--encoder",
-        choices=("hevc_nvenc", "libx265"),
-        default="hevc_nvenc",
+        choices=("hm", "hevc_nvenc", "libx265"),
+        default="hm",
     )
+    parser.add_argument("--hm-encoder", default=DEFAULT_HM_ENCODER)
+    parser.add_argument("--hm-config", default=DEFAULT_HM_CONFIG)
+    parser.add_argument("--hm-padding", type=int, default=32)
     parser.add_argument("--fps", type=float, default=None)
     parser.add_argument(
         "--overwrite",
@@ -61,7 +72,17 @@ def load_marker(path):
         return json.load(marker_file)
 
 
-def prepared_pair(output_root, source, sequence, qp, requested_frames):
+def prepared_pair(
+    output_root,
+    source,
+    sequence,
+    qp,
+    requested_frames,
+    encoder,
+    hm_encoder,
+    hm_config,
+    hm_padding,
+):
     marker = load_marker(marker_path(output_root, sequence, qp))
     if marker is None:
         return None
@@ -69,6 +90,13 @@ def prepared_pair(output_root, source, sequence, qp, requested_frames):
         marker.get("source") != os.path.abspath(source)
         or int(marker.get("qp", -1)) != qp
         or int(marker.get("requested_frames", -1)) != requested_frames
+        or marker.get("encoder") != encoder
+    ):
+        return None
+    if encoder == "hm" and (
+        marker.get("hm_encoder") != os.path.abspath(hm_encoder)
+        or marker.get("hm_config") != os.path.abspath(hm_config)
+        or int(marker.get("hm_padding", -1)) != hm_padding
     ):
         return None
 
@@ -93,7 +121,15 @@ def prepare_pair(args, split, video_id):
 
     if not args.overwrite:
         actual_frames = prepared_pair(
-            args.output_root, source, video_id, args.qp, args.frames
+            args.output_root,
+            source,
+            video_id,
+            args.qp,
+            args.frames,
+            args.encoder,
+            args.hm_encoder,
+            args.hm_config,
+            args.hm_padding,
         )
         if actual_frames is not None:
             print(
@@ -117,6 +153,12 @@ def prepare_pair(args, split, video_id):
         str(args.frames),
         "--encoder",
         args.encoder,
+        "--hm-encoder",
+        args.hm_encoder,
+        "--hm-config",
+        args.hm_config,
+        "--hm-padding",
+        str(args.hm_padding),
         "--overwrite",
     ]
     if args.fps is not None:
@@ -144,6 +186,10 @@ def prepare_pair(args, split, video_id):
         "qp": args.qp,
         "requested_frames": args.frames,
         "actual_frames": raw_count,
+        "encoder": args.encoder,
+        "hm_encoder": os.path.abspath(args.hm_encoder) if args.encoder == "hm" else "",
+        "hm_config": os.path.abspath(args.hm_config) if args.encoder == "hm" else "",
+        "hm_padding": args.hm_padding if args.encoder == "hm" else 0,
     }
     path = marker_path(args.output_root, video_id, args.qp)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -172,18 +218,23 @@ def main():
                     f"Video {video_id:03d} has only {actual_frames} frames, fewer than "
                     f"the fixed training length {args.frames}. Choose a smaller --frames value."
                 )
-            rows.append([video_id, split, args.qp, args.frames, actual_frames])
+            rows.append(
+                [video_id, split, args.qp, args.frames, actual_frames, args.encoder]
+            )
 
     split_path = os.path.join(args.output_root, "split.csv")
     with open(split_path, "w", encoding="utf8", newline="") as split_file:
         writer = csv.writer(split_file)
-        writer.writerow(["Sequence", "Split", "QP", "Frames Used", "Frames Available"])
+        writer.writerow(
+            ["Sequence", "Split", "QP", "Frames Used", "Frames Available", "Encoder"]
+        )
         writer.writerows(rows)
 
     print("\nLDV fine-tuning data is ready")
     print(f"Train videos   : {len(args.train_ids)}")
     print(f"Val videos     : {len(args.val_ids)}")
     print(f"QP / frames    : {args.qp} / {args.frames}")
+    print(f"Encoder        : {args.encoder}")
     print(f"Data root      : {args.output_root}")
     print(f"Split manifest : {split_path}")
 

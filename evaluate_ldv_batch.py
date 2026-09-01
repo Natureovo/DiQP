@@ -8,6 +8,14 @@ from statistics import mean
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_HM_ENCODER = os.environ.get(
+    "DIQP_HM_ENCODER",
+    "/home/cp/\u684c\u9762/yx/HM/bin/umake/gcc-9.4/x86_64/release/TAppEncoder",
+)
+DEFAULT_HM_CONFIG = os.environ.get(
+    "DIQP_HM_CONFIG",
+    "/home/cp/\u684c\u9762/yx/HM/cfg/encoder_randomaccess_main.cfg",
+)
 
 
 def parse_args():
@@ -34,9 +42,12 @@ def parse_args():
     )
     parser.add_argument(
         "--encoder",
-        choices=("hevc_nvenc", "libx265"),
-        default="hevc_nvenc",
+        choices=("hm", "hevc_nvenc", "libx265"),
+        default="hm",
     )
+    parser.add_argument("--hm-encoder", default=DEFAULT_HM_ENCODER)
+    parser.add_argument("--hm-config", default=DEFAULT_HM_CONFIG)
+    parser.add_argument("--hm-padding", type=int, default=32)
     parser.add_argument("--output-root", default=os.path.join(BASE_DIR, "data"))
     parser.add_argument("--run-root", default=os.path.join(BASE_DIR, "batchResults"))
     parser.add_argument(
@@ -64,6 +75,18 @@ def run_command(command):
 def read_metrics(path):
     with open(path, "r", encoding="utf8", newline="") as metrics_file:
         return list(csv.DictReader(metrics_file))
+
+
+def read_protocol(path):
+    values = {}
+    if not os.path.isfile(path):
+        return values
+    with open(path, "r", encoding="utf8") as protocol_file:
+        for line in protocol_file:
+            key, separator, value = line.rstrip("\n").partition("=")
+            if separator:
+                values[key] = value
+    return values
 
 
 def metric_mean(rows, field):
@@ -154,6 +177,13 @@ def main():
         run_dir = os.path.abspath(args.resume_run)
         if not os.path.isdir(run_dir):
             raise FileNotFoundError(f"Resume run directory does not exist: {run_dir}")
+        original_protocol = read_protocol(os.path.join(run_dir, "protocol.txt"))
+        original_encoder = original_protocol.get("encoder")
+        if original_encoder is not None and original_encoder != args.encoder:
+            raise ValueError(
+                "Cannot resume an evaluation with a different encoder: "
+                f"original={original_encoder}, requested={args.encoder}"
+            )
         protocol_name = f"resume_{timestamp}.txt"
     else:
         run_dir = os.path.join(args.run_root, f"ldv_{timestamp}")
@@ -245,6 +275,12 @@ def main():
                 str(args.frames),
                 "--encoder",
                 args.encoder,
+                "--hm-encoder",
+                args.hm_encoder,
+                "--hm-config",
+                args.hm_config,
+                "--hm-padding",
+                str(args.hm_padding),
                 "--overwrite",
             ]
             test_command = [
