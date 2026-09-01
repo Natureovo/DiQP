@@ -129,7 +129,7 @@ class myDataset(Dataset):
             df = df.sort_values(by=['seqNum','middle', 'qp',]).reset_index(drop=True)
             
         else:
-            qp = [totalQualities]
+            qp = totalQualities if isinstance(totalQualities, list) else [totalQualities]
             offsetW = self._tile_offsets(self.VisibleWindow['width'])
             offsetH = self._tile_offsets(self.VisibleWindow['height'])
             combinations = list(itertools.product(seqNumbers,middle,qp,offsetW,offsetH))

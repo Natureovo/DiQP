@@ -88,21 +88,46 @@ def read_split(path):
     qps = {int(row["QP"]) for row in rows}
     frame_counts = {int(row["Frames Used"]) for row in rows}
     encoders = {row.get("Encoder", "unknown") or "unknown" for row in rows}
-    if len(qps) != 1 or len(frame_counts) != 1:
-        raise ValueError("Pilot fine-tuning requires one QP and one fixed frame count.")
+    hm_encoders = {row.get("HM Encoder", "") for row in rows}
+    hm_configs = {row.get("HM Config", "") for row in rows}
+    hm_paddings = {int(row.get("HM Padding", 0) or 0) for row in rows}
+    if not qps or len(frame_counts) != 1:
+        raise ValueError("Fine-tuning requires at least one QP and one fixed frame count.")
     if len(encoders) != 1:
         raise ValueError(f"Split manifest mixes encoder protocols: {sorted(encoders)}")
+    if len(hm_encoders) != 1 or len(hm_configs) != 1 or len(hm_paddings) != 1:
+        raise ValueError("Split manifest mixes HM executable/config/padding settings.")
 
-    train_sequences = [int(row["Sequence"]) for row in rows if row["Split"] == "train"]
-    val_sequences = [int(row["Sequence"]) for row in rows if row["Split"] == "val"]
+    train_sequences = sorted(
+        {int(row["Sequence"]) for row in rows if row["Split"] == "train"}
+    )
+    val_sequences = sorted(
+        {int(row["Sequence"]) for row in rows if row["Split"] == "val"}
+    )
     if not train_sequences or not val_sequences:
         raise ValueError("Split manifest must contain train and val sequences.")
+    expected_pairs = {
+        (sequence, qp)
+        for sequence in train_sequences + val_sequences
+        for qp in qps
+    }
+    actual_pairs = {
+        (int(row["Sequence"]), int(row["QP"]))
+        for row in rows
+        if row["Split"] in ("train", "val")
+    }
+    missing_pairs = sorted(expected_pairs - actual_pairs)
+    if missing_pairs:
+        raise ValueError(f"Split manifest is missing sequence/QP pairs: {missing_pairs}")
     return (
         train_sequences,
         val_sequences,
-        qps.pop(),
+        sorted(qps),
         frame_counts.pop(),
         encoders.pop(),
+        hm_encoders.pop(),
+        hm_configs.pop(),
+        hm_paddings.pop(),
     )
 
 
@@ -120,19 +145,21 @@ def detect_geometry(data_root, sequence):
     raise FileNotFoundError(f"Could not read frame 000 under: {raw_dir}")
 
 
-def validate_prepared_data(data_root, sequences, qp, frames, raw_suffix):
+def validate_prepared_data(data_root, sequences, qps, frames, raw_suffix):
     for sequence in sequences:
         raw_dir = os.path.join(data_root, "Raw", f"{sequence:03d}")
-        encoded_dir = os.path.join(
-            data_root, "Encoded", f"{sequence:03d}", f"QP-{qp}"
-        )
-        for frame in range(frames):
-            raw_frame = os.path.join(raw_dir, f"{frame:03d}{raw_suffix}.png")
-            encoded_frame = os.path.join(encoded_dir, f"{frame:03d}.png")
-            if not os.path.isfile(raw_frame) or not os.path.isfile(encoded_frame):
-                raise FileNotFoundError(
-                    f"Missing aligned frame for sequence {sequence:03d}, frame {frame:03d}."
-                )
+        for qp in qps:
+            encoded_dir = os.path.join(
+                data_root, "Encoded", f"{sequence:03d}", f"QP-{qp}"
+            )
+            for frame in range(frames):
+                raw_frame = os.path.join(raw_dir, f"{frame:03d}{raw_suffix}.png")
+                encoded_frame = os.path.join(encoded_dir, f"{frame:03d}.png")
+                if not os.path.isfile(raw_frame) or not os.path.isfile(encoded_frame):
+                    raise FileNotFoundError(
+                        f"Missing aligned frame for sequence {sequence:03d}, "
+                        f"QP {qp}, frame {frame:03d}."
+                    )
 
 
 def build_model():
@@ -180,7 +207,7 @@ def set_training_mode(model, scope):
 
 
 def move_batch(batch, device):
-    x, y, around, ahead_cropped, ahead_scaled, loc, _, decay = batch
+    x, y, around, ahead_cropped, ahead_scaled, loc, log, decay = batch
     return (
         x.to(device, non_blocking=True),
         y.to(device, non_blocking=True),
@@ -189,12 +216,26 @@ def move_batch(batch, device):
         ahead_scaled.to(device, non_blocking=True),
         loc.to(device, non_blocking=True).permute(1, 0, 2),
         decay.to(device, non_blocking=True).view(-1, 1, 1, 1, 1),
+        log,
     )
 
 
-def average_psnr(prediction, reference):
+def sample_psnr(prediction, reference):
     mse = torch.mean((prediction - reference) ** 2, dim=(1, 2, 3, 4))
-    return torch.mean(-10.0 * torch.log10(torch.clamp(mse, min=1e-12))).item()
+    return -10.0 * torch.log10(torch.clamp(mse, min=1e-12))
+
+
+def batch_qps(log):
+    if not isinstance(log, (list, tuple)) or len(log) < 3:
+        raise RuntimeError("Dataset log does not contain QP values.")
+    values = log[2]
+    if isinstance(values, torch.Tensor):
+        return [int(value) for value in values.detach().cpu().reshape(-1).tolist()]
+    if isinstance(values, np.ndarray):
+        return [int(value) for value in values.reshape(-1).tolist()]
+    if isinstance(values, (list, tuple)):
+        return [int(value) for value in values]
+    return [int(values)]
 
 
 def validate(model, loader, loss_fn, device, amp_enabled):
@@ -203,9 +244,10 @@ def validate(model, loader, loss_fn, device, amp_enabled):
     predicted_psnr_sum = 0.0
     base_psnr_sum = 0.0
     sample_count = 0
+    per_qp = {}
     with torch.no_grad():
         for batch in tqdm(loader, desc="Validation", leave=False):
-            x, y, around, ahead_cropped, ahead_scaled, loc, decay = move_batch(
+            x, y, around, ahead_cropped, ahead_scaled, loc, decay, log = move_batch(
                 batch, device
             )
             with torch.cuda.amp.autocast(enabled=amp_enabled):
@@ -213,20 +255,47 @@ def validate(model, loader, loss_fn, device, amp_enabled):
                 loss = loss_fn(output, y)
             output = torch.clamp(output, 0, 1)
             current_batch = x.shape[0]
+            predicted_values = sample_psnr(output, y).detach().cpu().tolist()
+            base_values = sample_psnr(x, y).detach().cpu().tolist()
+            qps = batch_qps(log)
+            if len(qps) != current_batch:
+                raise RuntimeError(
+                    f"Validation QP count mismatch: qps={len(qps)}, batch={current_batch}"
+                )
             loss_sum += loss.item() * current_batch
-            predicted_psnr_sum += average_psnr(output, y) * current_batch
-            base_psnr_sum += average_psnr(x, y) * current_batch
+            predicted_psnr_sum += sum(predicted_values)
+            base_psnr_sum += sum(base_values)
             sample_count += current_batch
+            for qp, predicted_value, base_value in zip(
+                qps, predicted_values, base_values
+            ):
+                bucket = per_qp.setdefault(
+                    qp, {"predicted_sum": 0.0, "base_sum": 0.0, "samples": 0}
+                )
+                bucket["predicted_sum"] += predicted_value
+                bucket["base_sum"] += base_value
+                bucket["samples"] += 1
     if sample_count == 0:
         raise RuntimeError("Validation loader is empty.")
     predicted_psnr = predicted_psnr_sum / sample_count
     base_psnr = base_psnr_sum / sample_count
+    per_qp_metrics = {}
+    for qp, bucket in sorted(per_qp.items()):
+        qp_predicted = bucket["predicted_sum"] / bucket["samples"]
+        qp_base = bucket["base_sum"] / bucket["samples"]
+        per_qp_metrics[qp] = {
+            "psnr_predicted": qp_predicted,
+            "psnr_base": qp_base,
+            "psnr_gain": qp_predicted - qp_base,
+            "samples": bucket["samples"],
+        }
     return {
         "loss": loss_sum / sample_count,
         "psnr_predicted": predicted_psnr,
         "psnr_base": base_psnr,
         "psnr_gain": predicted_psnr - base_psnr,
         "samples": sample_count,
+        "per_qp": per_qp_metrics,
     }
 
 
@@ -255,14 +324,29 @@ def main():
     set_seed(SEED)
     device = torch.device("cuda")
     split_path = args.split_file or os.path.join(args.data_root, "split.csv")
-    train_sequences, val_sequences, qp, frames, encoder = read_split(split_path)
+    (
+        train_sequences,
+        val_sequences,
+        qps,
+        frames,
+        encoder,
+        hm_encoder,
+        hm_config,
+        hm_padding,
+    ) = read_split(split_path)
+    qp_conditions = {qp: qp // 3 for qp in qps}
+    if len(set(qp_conditions.values())) != len(qp_conditions):
+        raise ValueError(
+            "QP values collide after DiQP qp//3 conditioning: "
+            f"{qp_conditions}"
+        )
     width, height, raw_suffix = detect_geometry(args.data_root, train_sequences[0])
     if width < 512 or height < 512:
         raise RuntimeError(f"Frames are too small for DiQP: {width}x{height}")
     validate_prepared_data(
         args.data_root,
         train_sequences + val_sequences,
-        qp,
+        qps,
         frames,
         raw_suffix,
     )
@@ -273,7 +357,7 @@ def main():
         rawPath=os.path.join(args.data_root, "Raw"),
         qpPath=os.path.join(args.data_root, "Encoded"),
         extractingMethod="even",
-        totalQualities=[qp],
+        totalQualities=qps,
         cropSize=512,
         frac=1,
         random_state=SEED,
@@ -291,7 +375,7 @@ def main():
         rawPath=os.path.join(args.data_root, "Raw"),
         qpPath=os.path.join(args.data_root, "Encoded"),
         extractingMethod="even",
-        totalQualities=qp,
+        totalQualities=qps,
         cropSize=512,
         frac=args.val_fraction,
         random_state=SEED,
@@ -350,7 +434,10 @@ def main():
                 "Resume checkpoint train scope differs from --train-scope: "
                 f"{resume.get('train_scope')} vs {args.train_scope}."
             )
-        if int(resume.get("qp", -1)) != qp or int(resume.get("frames", -1)) != frames:
+        resume_qps = resume.get("qps")
+        if resume_qps is None and resume.get("qp") is not None:
+            resume_qps = [int(resume["qp"])]
+        if sorted(resume_qps or []) != qps or int(resume.get("frames", -1)) != frames:
             raise ValueError("Resume checkpoint QP/frame settings differ from the split.")
         resume_encoder = resume.get("encoder", "unknown")
         if resume_encoder != encoder:
@@ -358,6 +445,12 @@ def main():
                 "Resume checkpoint encoder differs from the split: "
                 f"{resume_encoder} vs {encoder}."
             )
+        if encoder == "hm" and (
+            resume.get("hm_encoder", "") != hm_encoder
+            or resume.get("hm_config", "") != hm_config
+            or int(resume.get("hm_padding", -1)) != hm_padding
+        ):
+            raise ValueError("Resume checkpoint HM executable/config/padding differs from the split.")
         model.load_state_dict(checkpoint_state_dict(resume), strict=True)
         optimizer.load_state_dict(resume["optimizer"])
         scheduler.load_state_dict(resume["scheduler"])
@@ -382,9 +475,13 @@ def main():
         "split_file": os.path.abspath(split_path),
         "train_sequences": train_sequences,
         "val_sequences": val_sequences,
-        "qp": qp,
+        "qps": qps,
+        "qp_conditions": qp_conditions,
         "frames": frames,
         "encoder": encoder,
+        "hm_encoder": hm_encoder,
+        "hm_config": hm_config,
+        "hm_padding": hm_padding,
         "resolution": f"{width}x{height}",
     }
     with open(os.path.join(output_dir, "config.json"), "w", encoding="utf8") as file:
@@ -407,6 +504,22 @@ def main():
                 "Learning Rate",
             ]
         )
+    qp_history_path = os.path.join(output_dir, "validation_by_qp.csv")
+    qp_history_exists = os.path.isfile(qp_history_path)
+    qp_history_file = open(qp_history_path, "a", encoding="utf8", newline="")
+    qp_history = csv.writer(qp_history_file)
+    if not qp_history_exists:
+        qp_history.writerow(
+            [
+                "Epoch",
+                "Global Step",
+                "QP",
+                "Val PSNR Predicted",
+                "Val PSNR Base",
+                "Val PSNR Gain",
+                "Samples",
+            ]
+        )
 
     total_parameters = sum(parameter.numel() for parameter in model.parameters())
     trainable_parameters = sum(parameter.numel() for parameter in trainable)
@@ -414,8 +527,12 @@ def main():
     print(f"Data / resolution : {args.data_root} / {width}x{height}")
     print(f"Train / val videos: {len(train_sequences)} / {len(val_sequences)}")
     print(f"Train / val samples: {len(trainset)} / {len(valset)}")
-    print(f"QP / frames       : {qp} / {frames}")
+    print(f"QPs / frames      : {qps} / {frames}")
+    print(f"QP conditions     : {qp_conditions}")
     print(f"Encoder           : {encoder}")
+    if encoder == "hm":
+        print(f"HM config         : {hm_config}")
+        print(f"HM padding        : {hm_padding}")
     print(f"Train scope       : {args.train_scope}")
     print(f"Parameters        : {trainable_parameters:,} trainable / {total_parameters:,}")
     print(f"Output directory  : {output_dir}")
@@ -428,9 +545,12 @@ def main():
             "global_step": 0,
             "best_val_psnr_gain": best_gain,
             "train_scope": args.train_scope,
-            "qp": qp,
+            "qps": qps,
             "frames": frames,
             "encoder": encoder,
+            "hm_encoder": hm_encoder,
+            "hm_config": hm_config,
+            "hm_padding": hm_padding,
         }
         save_checkpoint(
             os.path.join(output_dir, "best.pt"),
@@ -452,8 +572,28 @@ def main():
                 optimizer.param_groups[0]["lr"],
             ]
         )
+        for qp, qp_metrics in baseline["per_qp"].items():
+            qp_history.writerow(
+                [
+                    0,
+                    0,
+                    qp,
+                    qp_metrics["psnr_predicted"],
+                    qp_metrics["psnr_base"],
+                    qp_metrics["psnr_gain"],
+                    qp_metrics["samples"],
+                ]
+            )
         history_file.flush()
+        qp_history_file.flush()
         print(f"Validation baseline: {best_gain:+.4f} dB PSNR gain")
+        print(
+            "Per-QP baseline : "
+            + ", ".join(
+                f"QP {qp}={values['psnr_gain']:+.4f} dB"
+                for qp, values in baseline["per_qp"].items()
+            )
+        )
 
     stop_training = False
     for epoch in range(start_epoch, args.epochs):
@@ -462,7 +602,7 @@ def main():
         sample_count = 0
         progress = tqdm(trainloader, desc=f"Epoch {epoch + 1}/{args.epochs}")
         for batch in progress:
-            x, y, around, ahead_cropped, ahead_scaled, loc, decay = move_batch(
+            x, y, around, ahead_cropped, ahead_scaled, loc, decay, _ = move_batch(
                 batch, device
             )
             optimizer.zero_grad(set_to_none=True)
@@ -494,9 +634,12 @@ def main():
             "global_step": global_step,
             "best_val_psnr_gain": max(best_gain, metrics["psnr_gain"]),
             "train_scope": args.train_scope,
-            "qp": qp,
+            "qps": qps,
             "frames": frames,
             "encoder": encoder,
+            "hm_encoder": hm_encoder,
+            "hm_config": hm_config,
+            "hm_padding": hm_padding,
         }
         save_checkpoint(
             os.path.join(output_dir, "last.pt"),
@@ -530,16 +673,37 @@ def main():
                 learning_rate,
             ]
         )
+        for qp, qp_metrics in metrics["per_qp"].items():
+            qp_history.writerow(
+                [
+                    epoch + 1,
+                    global_step,
+                    qp,
+                    qp_metrics["psnr_predicted"],
+                    qp_metrics["psnr_base"],
+                    qp_metrics["psnr_gain"],
+                    qp_metrics["samples"],
+                ]
+            )
         history_file.flush()
+        qp_history_file.flush()
         print(
             f"Epoch {epoch + 1}: train loss={train_loss:.6f}, "
             f"val gain={metrics['psnr_gain']:+.4f} dB, "
             f"best={best_gain:+.4f} dB"
         )
+        print(
+            "Per-QP gains     : "
+            + ", ".join(
+                f"QP {qp}={values['psnr_gain']:+.4f} dB"
+                for qp, values in metrics["per_qp"].items()
+            )
+        )
         if stop_training:
             break
 
     history_file.close()
+    qp_history_file.close()
     peak_memory = torch.cuda.max_memory_allocated() / (1024 ** 3)
     print("Fine-tuning finished")
     print(f"Best checkpoint : {os.path.join(output_dir, 'best.pt')}")

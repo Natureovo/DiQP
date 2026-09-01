@@ -36,7 +36,19 @@ def parse_args():
         default=list(range(21, 31)),
     )
     parser.add_argument("--val-ids", type=int, nargs="+", default=[31, 32, 33])
-    parser.add_argument("--qp", type=int, default=42)
+    parser.add_argument(
+        "--qps",
+        type=int,
+        nargs="+",
+        default=[22, 27, 32, 37, 42],
+        help="HM QPs to prepare. Defaults to the common multi-QP benchmark set.",
+    )
+    parser.add_argument(
+        "--qp",
+        type=int,
+        default=None,
+        help="Backward-compatible single-QP override.",
+    )
     parser.add_argument("--frames", type=int, default=120)
     parser.add_argument(
         "--encoder",
@@ -52,7 +64,11 @@ def parse_args():
         action="store_true",
         help="Regenerate pairs even when a matching completion marker exists.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.qp is not None:
+        args.qps = [args.qp]
+    args.qps = sorted(set(args.qps))
+    return args
 
 
 def count_png_files(directory):
@@ -114,7 +130,7 @@ def prepared_pair(
     return None
 
 
-def prepare_pair(args, split, video_id):
+def prepare_pair(args, split, video_id, qp):
     source = os.path.join(args.ldv_dir, f"{video_id:03d}.mkv")
     if not os.path.isfile(source):
         raise FileNotFoundError(f"Cannot find LDV source video: {source}")
@@ -124,7 +140,7 @@ def prepare_pair(args, split, video_id):
             args.output_root,
             source,
             video_id,
-            args.qp,
+            qp,
             args.frames,
             args.encoder,
             args.hm_encoder,
@@ -134,7 +150,7 @@ def prepare_pair(args, split, video_id):
         if actual_frames is not None:
             print(
                 f"Skipping prepared {split} video {video_id:03d}: "
-                f"{actual_frames} frames"
+                f"QP {qp}, {actual_frames} frames"
             )
             return actual_frames
 
@@ -148,7 +164,7 @@ def prepare_pair(args, split, video_id):
         "--sequence",
         str(video_id),
         "--qp",
-        str(args.qp),
+        str(qp),
         "--frames",
         str(args.frames),
         "--encoder",
@@ -164,12 +180,12 @@ def prepare_pair(args, split, video_id):
     if args.fps is not None:
         command.extend(["--fps", str(args.fps)])
 
-    print(f"\nPreparing {split} video {video_id:03d}", flush=True)
+    print(f"\nPreparing {split} video {video_id:03d}, QP {qp}", flush=True)
     subprocess.run(command, cwd=BASE_DIR, check=True)
 
     raw_dir = os.path.join(args.output_root, "Raw", f"{video_id:03d}")
     encoded_dir = os.path.join(
-        args.output_root, "Encoded", f"{video_id:03d}", f"QP-{args.qp}"
+        args.output_root, "Encoded", f"{video_id:03d}", f"QP-{qp}"
     )
     raw_count = count_png_files(raw_dir)
     encoded_count = count_png_files(encoded_dir)
@@ -183,7 +199,7 @@ def prepare_pair(args, split, video_id):
         "source": os.path.abspath(source),
         "split": split,
         "sequence": video_id,
-        "qp": args.qp,
+        "qp": qp,
         "requested_frames": args.frames,
         "actual_frames": raw_count,
         "encoder": args.encoder,
@@ -191,7 +207,7 @@ def prepare_pair(args, split, video_id):
         "hm_config": os.path.abspath(args.hm_config) if args.encoder == "hm" else "",
         "hm_padding": args.hm_padding if args.encoder == "hm" else 0,
     }
-    path = marker_path(args.output_root, video_id, args.qp)
+    path = marker_path(args.output_root, video_id, qp)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf8") as marker_file:
         json.dump(marker, marker_file, indent=2)
@@ -202,8 +218,8 @@ def main():
     args = parse_args()
     if args.frames < 3:
         raise ValueError("--frames must be at least 3.")
-    if args.qp < 0:
-        raise ValueError("--qp must be non-negative.")
+    if not args.qps or any(qp < 0 or qp > 255 for qp in args.qps):
+        raise ValueError("--qps must contain values in [0, 255].")
     overlap = sorted(set(args.train_ids) & set(args.val_ids))
     if overlap:
         raise ValueError(f"Train and validation IDs overlap: {overlap}")
@@ -212,28 +228,49 @@ def main():
     rows = []
     for split, video_ids in (("train", args.train_ids), ("val", args.val_ids)):
         for video_id in video_ids:
-            actual_frames = prepare_pair(args, split, video_id)
-            if actual_frames < args.frames:
-                raise RuntimeError(
-                    f"Video {video_id:03d} has only {actual_frames} frames, fewer than "
-                    f"the fixed training length {args.frames}. Choose a smaller --frames value."
+            for qp in args.qps:
+                actual_frames = prepare_pair(args, split, video_id, qp)
+                if actual_frames < args.frames:
+                    raise RuntimeError(
+                        f"Video {video_id:03d} has only {actual_frames} frames, fewer than "
+                        f"the fixed training length {args.frames}. Choose a smaller --frames value."
+                    )
+                rows.append(
+                    [
+                        video_id,
+                        split,
+                        qp,
+                        args.frames,
+                        actual_frames,
+                        args.encoder,
+                        os.path.abspath(args.hm_encoder) if args.encoder == "hm" else "",
+                        os.path.abspath(args.hm_config) if args.encoder == "hm" else "",
+                        args.hm_padding if args.encoder == "hm" else 0,
+                    ]
                 )
-            rows.append(
-                [video_id, split, args.qp, args.frames, actual_frames, args.encoder]
-            )
 
     split_path = os.path.join(args.output_root, "split.csv")
     with open(split_path, "w", encoding="utf8", newline="") as split_file:
         writer = csv.writer(split_file)
         writer.writerow(
-            ["Sequence", "Split", "QP", "Frames Used", "Frames Available", "Encoder"]
+            [
+                "Sequence",
+                "Split",
+                "QP",
+                "Frames Used",
+                "Frames Available",
+                "Encoder",
+                "HM Encoder",
+                "HM Config",
+                "HM Padding",
+            ]
         )
         writer.writerows(rows)
 
     print("\nLDV fine-tuning data is ready")
     print(f"Train videos   : {len(args.train_ids)}")
     print(f"Val videos     : {len(args.val_ids)}")
-    print(f"QP / frames    : {args.qp} / {args.frames}")
+    print(f"QPs / frames   : {args.qps} / {args.frames}")
     print(f"Encoder        : {args.encoder}")
     print(f"Data root      : {args.output_root}")
     print(f"Split manifest : {split_path}")

@@ -28,7 +28,12 @@ def parse_args():
         help="Directory containing numbered LDV MKV files.",
     )
     parser.add_argument("--video-ids", type=int, nargs="+", default=[1, 2, 3, 4, 5])
-    parser.add_argument("--qps", type=int, nargs="+", default=[32, 37, 42])
+    parser.add_argument(
+        "--qps",
+        type=int,
+        nargs="+",
+        default=[22, 27, 32, 37, 42],
+    )
     parser.add_argument("--start-sequence", type=int, default=101)
     parser.add_argument("--frames", type=int, default=60)
     parser.add_argument("--fraction", type=float, default=1.0)

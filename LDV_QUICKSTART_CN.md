@@ -56,10 +56,10 @@ HM 是 CPU 参考编码器，速度会明显慢于 `hevc_nvenc`。如需重跑�
 
 `512×512` 是预训练模型固定的输入块大小，不是最终评价窗口。整帧模式会把所有重叠块加权拼回原始分辨率，并让每个视频帧只参与一次最终统计。整帧模式必须使用 `--fraction 1`，否则无法覆盖完整画面。
 
-下面的命令自动测试前 5 个 LDV 视频，每个视频使用 HM 测试 QP 32、37、42。默认将重叠的 512×512 预测加权拼回完整帧，再计算 RGB-PSNR、Y-PSNR 和 SSIM：
+下面的命令自动测试前 5 个 LDV 视频，每个视频使用 HM 测试标准多 QP 集合 22、27、32、37、42。默认将重叠的 512×512 预测加权拼回完整帧，再计算 RGB-PSNR、Y-PSNR 和 SSIM：
 
 ```bash
-/home/cp/anaconda3/envs/diqp/bin/python evaluate_ldv_batch.py --video-ids 1 2 3 4 5 --qps 32 37 42 --frames 60 --fraction 1 --batch-size 1 --save-limit 2
+/home/cp/anaconda3/envs/diqp/bin/python evaluate_ldv_batch.py --video-ids 1 2 3 4 5 --qps 22 27 32 37 42 --frames 60 --fraction 1 --batch-size 1 --save-limit 2
 ```
 
 首次切换到 HM 前，可以删除 DiQP 临时 NVENC 帧数据；不要删除 `batchResults`、`runs`、`pretrained` 或 `modelone/dataset/hm_results`：
@@ -81,3 +81,25 @@ rm -rf -- /home/cp/桌面/yx/DiQP/data/LDV_finetune
 ```bash
 /home/cp/anaconda3/envs/diqp/bin/python evaluate_ldv_batch.py --video-ids 1 2 3 4 5 --qps 42 --frames 200 --fraction 1 --batch-size 1 --save-limit 2 --resume-run /home/cp/桌面/yx/DiQP/batchResults/ldv_20260901_093450
 ```
+
+## 5. HM 多 QP 微调
+
+训练集固定使用 LDV 021–030，验证集使用 031–033；测试集保留 001–020，三者不重叠。默认准备 QP 22、27、32、37、42，每个视频 120 帧，并支持通过 `.prepared` 标记断点续做：
+
+```bash
+/home/cp/anaconda3/envs/diqp/bin/python prepare_ldv_finetune.py --qps 22 27 32 37 42 --frames 120 --encoder hm
+```
+
+准备完成后先进行两步 decoder 冒烟训练：
+
+```bash
+/home/cp/anaconda3/envs/diqp/bin/python train_ldv.py --epochs 1 --train-scope decoder --max-steps 2 --val-fraction 0.02 --run-name smoke_decoder_hm_multiqp
+```
+
+冒烟测试通过后再执行正式训练：
+
+```bash
+/home/cp/anaconda3/envs/diqp/bin/python train_ldv.py --epochs 5 --train-scope decoder --val-fraction 0.1 --run-name decoder_hm_multiqp
+```
+
+`history.csv` 保存全部 QP 的综合验证结果，`validation_by_qp.csv` 保存每个 QP 的独立 PSNR 增益。checkpoint 同时记录 HM 编码器和完整 QP 列表，不能误接到旧 NVENC 单 QP 训练任务上。
