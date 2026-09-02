@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .tmp_*/
 *.exe
+!tools/hm16_3/HM16.3-standard.exe
 *.rar
 
 data/

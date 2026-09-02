@@ -9,7 +9,7 @@ import sys
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_HM16_3_ENCODER = os.environ.get(
     "DIQP_HM16_3_ENCODER",
-    "/home/cp/tools/hm16_3/HM16.3-standard.exe",
+    os.path.join(BASE_DIR, "tools", "hm16_3", "HM16.3-standard.exe"),
 )
 DEFAULT_HM_ENCODER = os.environ.get(
     "DIQP_HM_ENCODER",

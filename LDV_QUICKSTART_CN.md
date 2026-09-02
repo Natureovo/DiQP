@@ -6,18 +6,18 @@ Python 已经替代 `cfg_hm16.3_LDP.exe` 生成配置，但所有有效编码参
 
 注意：这是项目指定的 HM 16.3 LDP 实验协议，并不是 DiQP 原论文的 FFmpeg/NVIDIA 编码协议，因此结果不能称为原论文同编码器复现。
 
-## 0. 安装编码器
+## 0. 编码器文件
 
-不要把 EXE 提交到 Git。将压缩包内 `HM16.3-standard.exe` 单独传到服务器：
+经项目维护者确认，压缩包内的编码器随代码仓库统一传输。服务器执行 `git pull` 后文件位于：
 
 ```text
-/home/cp/tools/hm16_3/HM16.3-standard.exe
+/home/cp/桌面/yx/DiQP/tools/hm16_3/HM16.3-standard.exe
 ```
 
 在服务器核对文件和 Wine；正确 EXE 的 SHA-256 必须是 `3243e12f542273733171d972b92e5a2389f43d58afcce636590cbaf32fae834d`：
 
 ```bash
-sha256sum /home/cp/tools/hm16_3/HM16.3-standard.exe
+sha256sum /home/cp/桌面/yx/DiQP/tools/hm16_3/HM16.3-standard.exe
 ```
 
 ```bash
@@ -45,7 +45,7 @@ data/Encoded/101/QP-42/hm16_3_ldp_encode.log
 data/Encoded/101/QP-42/encoding_protocol.txt
 ```
 
-默认编码器路径为 `/home/cp/tools/hm16_3/HM16.3-standard.exe`。输入尺寸按压缩包流程补齐到 8 的倍数；`960×536` 已满足要求，不再人为补到 `960×544`。临时输入和重建 YUV 放在 `/tmp/diqp_hm16_3` 的纯英文路径中，成功后自动删除，只保留 `.bin` 码流、cfg、日志、协议和 PNG。
+默认编码器路径为项目内的 `tools/hm16_3/HM16.3-standard.exe`。输入尺寸按压缩包流程补齐到 8 的倍数；`960×536` 已满足要求，不再人为补到 `960×544`。临时输入和重建 YUV 放在 `/tmp/diqp_hm16_3` 的纯英文路径中，成功后自动删除，只保留 `.bin` 码流、cfg、日志、协议和 PNG。
 
 HM 是 CPU 参考编码器，速度会明显慢于 `hevc_nvenc`。旧的服务器 HM Random Access 流程仍可用 `--encoder hm` 显式选择，但新实验必须保持默认 `hm16_3_ldp`，不能混入旧数据。
 
