@@ -32,7 +32,15 @@ def parse_args():
     parser.add_argument("--width", type=int, default=960)
     parser.add_argument("--height", type=int, default=536)
     parser.add_argument("--pix-fmt", choices=("yuv420p",), default="yuv420p")
-    parser.add_argument("--frames", type=int, default=120)
+    parser.add_argument(
+        "--frames",
+        type=int,
+        default=120,
+        help=(
+            "Fixed number of leading frames per video. Use 0 to select the "
+            "largest common count automatically (capped at 300)."
+        ),
+    )
     parser.add_argument(
         "--output-root",
         default=str(BASE_DIR / "data" / "LDV_woLF_oneI_qp37"),
@@ -169,24 +177,45 @@ def extract_yuv(ffmpeg, source, output, output_root, args):
         raise RuntimeError(f"FFmpeg produced {actual} frames, expected {args.frames}: {output}")
 
 
-def inspect_pair(raw_dir, encoded_dir, video_id, qp, bytes_per_frame, frames):
+def inspect_pair(raw_dir, encoded_dir, video_id, qp, bytes_per_frame):
     raw = resolve_raw_yuv(raw_dir, video_id)
     reconstructed = resolve_reconstructed_yuv(encoded_dir, video_id, qp)
     raw_frames = frame_count(raw, bytes_per_frame)
     reconstructed_frames = frame_count(reconstructed, bytes_per_frame)
-    available = min(raw_frames, reconstructed_frames)
-    if available < frames:
-        raise ValueError(
-            f"Video {video_id} has fewer than {frames} usable leading frames: "
-            f"Raw={raw_frames}, reconstructed={reconstructed_frames}"
-        )
     if raw_frames != reconstructed_frames:
         print(
             f"Warning: video {video_id} total frame counts differ "
-            f"(Raw={raw_frames}, reconstructed={reconstructed_frames}); "
-            f"using the first {frames} aligned frames."
+            f"(Raw={raw_frames}, reconstructed={reconstructed_frames})."
         )
     return raw, reconstructed, raw_frames, reconstructed_frames
+
+
+def choose_frame_count(pairs, requested_frames):
+    available = {
+        video_id: min(pair[2], pair[3]) for video_id, pair in pairs.items()
+    }
+    if not available:
+        raise ValueError("No training or validation video IDs were provided.")
+    if requested_frames == 0:
+        selected = min(300, min(available.values()))
+        if selected < 3:
+            raise ValueError(f"Common usable frame count is too small: {selected}")
+        return selected
+
+    short = {
+        video_id: count
+        for video_id, count in available.items()
+        if count < requested_frames
+    }
+    if short:
+        details = ", ".join(
+            f"{video_id}={count}" for video_id, count in sorted(short.items())
+        )
+        raise ValueError(
+            f"Videos shorter than --frames {requested_frames}: {details}. "
+            "Use --frames 0 to select the largest common frame count automatically."
+        )
+    return requested_frames
 
 
 def prepare_video(args, ffmpeg, output_root, split, video_id, pair):
@@ -226,8 +255,8 @@ def main():
     args = parse_args()
     if args.qp < 0 or args.qp > 51:
         raise ValueError("HEVC --qp must be in [0, 51].")
-    if args.frames < 3 or args.frames > 300:
-        raise ValueError("--frames must be in [3, 300].")
+    if args.frames < 0 or args.frames > 300 or args.frames in (1, 2):
+        raise ValueError("--frames must be 0 (auto) or in [3, 300].")
     validate_disjoint_ids(args.train_ids, args.val_ids, args.test_ids)
 
     raw_dir = Path(args.raw_dir).expanduser().resolve()
@@ -248,10 +277,11 @@ def main():
             video_id,
             args.qp,
             bytes_per_frame,
-            args.frames,
         )
         for video_id in requested
     }
+    args.frames = choose_frame_count(pairs, args.frames)
+    print(f"Fixed frame count : {args.frames}")
 
     rows = []
     for split, video_ids in (("train", args.train_ids), ("val", args.val_ids)):

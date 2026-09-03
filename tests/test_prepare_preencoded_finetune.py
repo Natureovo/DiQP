@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from prepare_preencoded_finetune import (
+    choose_frame_count,
     frame_count,
     resolve_raw_yuv,
     resolve_reconstructed_yuv,
@@ -12,6 +13,22 @@ from prepare_preencoded_finetune import (
 
 
 class PreparePreencodedFinetuneTests(unittest.TestCase):
+    def test_auto_frame_count_uses_shortest_pair(self):
+        pairs = {
+            1: (None, None, 218, 216),
+            9: (None, None, 116, 116),
+        }
+        self.assertEqual(choose_frame_count(pairs, 0), 116)
+
+    def test_fixed_frame_count_reports_all_short_videos(self):
+        pairs = {
+            1: (None, None, 218, 216),
+            9: (None, None, 116, 116),
+            10: (None, None, 114, 112),
+        }
+        with self.assertRaisesRegex(ValueError, "9=116, 10=112"):
+            choose_frame_count(pairs, 120)
+
     def test_split_ids_must_be_video_disjoint(self):
         with self.assertRaisesRegex(ValueError, "train/test"):
             validate_disjoint_ids([1, 2], [3], [2, 4])

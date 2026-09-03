@@ -156,8 +156,10 @@ rm -rf -- /home/cp/桌面/yx/DiQP/data/LDV_finetune
 如果最终实验目标固定为 QP 37、`woLF + oneI`，应直接使用这套重建 YUV 微调，不能混入标准 HM LDP 或 NVENC 数据。下面示例保留之前使用的测试视频，只把互不重叠的 30/5 个视频用于训练和验证：
 
 ```bash
-/home/cp/anaconda3/envs/diqp/bin/python prepare_preencoded_finetune.py --raw-dir /media/cp/PHD3/DATASET/LDV_EX --encoded-dir /media/cp/PHD3/dataset_for_third_result/CQP/woLF/result_hevc_qp37_woLF_oneI --train-ids 1 2 3 4 5 6 7 8 9 11 12 13 14 15 16 17 18 19 21 22 23 24 25 26 27 28 29 30 31 32 --val-ids 33 34 35 36 37 --test-ids 20 40 60 80 100 101 102 103 104 120 140 160 180 200 220 261 267 274 --qp 37 --width 960 --height 536 --frames 120 --ffmpeg /usr/bin/ffmpeg
+/home/cp/anaconda3/envs/diqp/bin/python prepare_preencoded_finetune.py --raw-dir /media/cp/PHD3/DATASET/LDV_EX --encoded-dir /media/cp/PHD3/dataset_for_third_result/CQP/woLF/result_hevc_qp37_woLF_oneI --train-ids 1 2 3 4 5 6 7 8 9 11 12 13 14 15 16 17 18 19 21 22 23 24 25 26 27 28 29 30 31 32 --val-ids 33 34 35 36 37 --test-ids 20 40 60 80 100 101 102 103 104 120 140 160 180 200 220 261 267 274 --qp 37 --width 960 --height 536 --frames 0 --ffmpeg /usr/bin/ffmpeg
 ```
+
+`--frames 0` 会先扫描训练和验证视频，然后选取所有视频共同可用的最大固定帧数（最多 300 帧）。这样不会因个别视频少于 120 帧而中断，同时每个训练样本仍保持相同序列长度。
 
 先做两步冒烟训练，再进行正式 decoder 微调：
 
