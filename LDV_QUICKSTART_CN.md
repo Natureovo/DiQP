@@ -126,3 +126,27 @@ rm -rf -- /home/cp/桌面/yx/DiQP/data/LDV_finetune
 ```
 
 `history.csv` 保存全部 QP 的综合验证结果，`validation_by_qp.csv` 保存每个 QP 的独立 PSNR 增益。checkpoint 同时记录 HM 编码器和完整 QP 列表，不能误接到旧 NVENC 单 QP 训练任务上。
+
+## 6. 直接评测已有 Raw/重建 YUV
+
+如果数据已经包含成对的裸 YUV，例如 Raw 为 `{编号}.yuv`，QP 37 重建结果为 `{编号}_37rec.yuv`，可以跳过编码并直接评测。脚本会检查配对关系、文件大小和帧数；每次只把当前视频转换为临时 PNG，评测结束后自动清理，避免批量展开占用大量磁盘。
+
+先用一个视频和 12 帧做冒烟测试：
+
+```bash
+/home/cp/anaconda3/envs/diqp/bin/python evaluate_preencoded_yuv.py --raw-dir /media/cp/PHD3/DATASET/LDV_EX --encoded-dir /media/cp/PHD3/dataset_for_third_result/CQP/woLF/result_hevc_qp37_woLF_oneI --video-ids 100 --qp 37 --width 960 --height 536 --frames 12 --save-limit 3 --ffmpeg /usr/bin/ffmpeg
+```
+
+冒烟测试通过后评测 5 个完整视频：
+
+```bash
+/home/cp/anaconda3/envs/diqp/bin/python evaluate_preencoded_yuv.py --raw-dir /media/cp/PHD3/DATASET/LDV_EX --encoded-dir /media/cp/PHD3/dataset_for_third_result/CQP/woLF/result_hevc_qp37_woLF_oneI --video-ids 100 101 102 103 104 --qp 37 --width 960 --height 536 --frames 120 --save-limit 2 --ffmpeg /usr/bin/ffmpeg
+```
+
+确认流程和指标正常后，可评测全部匹配视频：
+
+```bash
+/home/cp/anaconda3/envs/diqp/bin/python evaluate_preencoded_yuv.py --raw-dir /media/cp/PHD3/DATASET/LDV_EX --encoded-dir /media/cp/PHD3/dataset_for_third_result/CQP/woLF/result_hevc_qp37_woLF_oneI --all-matched --qp 37 --width 960 --height 536 --frames 120 --save-limit 0 --ffmpeg /usr/bin/ffmpeg
+```
+
+结果保存在 `batchResults/preencoded_yuv/qp37_时间戳/`。`metrics.csv` 是逐视频指标，`summary.csv` 是总体汇总，`failures.csv` 记录失败项。默认模型输入是 `*_37rec.yuv`，对应的 `*_37str.bin` 不参与推理。目录名中的 `woLF` 和 `oneI` 表示特殊编码条件，这组结果应与标准 HM16.3 LDP 结果分开报告。
