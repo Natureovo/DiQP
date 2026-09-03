@@ -134,10 +134,11 @@ def aligned_frame_count(raw_path, reconstructed_path, width, height):
     raw_frames = raw_size // bytes_per_frame
     reconstructed_frames = reconstructed_size // bytes_per_frame
     if raw_frames != reconstructed_frames:
-        raise ValueError(
-            f"Frame count mismatch: raw={raw_frames}, reconstructed={reconstructed_frames}."
+        print(
+            "Warning: total frame counts differ; using their common leading range: "
+            f"raw={raw_frames}, reconstructed={reconstructed_frames}."
         )
-    return raw_frames
+    return min(raw_frames, reconstructed_frames)
 
 
 def resolve_executable(value):

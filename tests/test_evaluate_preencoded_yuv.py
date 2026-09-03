@@ -66,6 +66,19 @@ class PreencodedYuvTests(unittest.TestCase):
 
             self.assertEqual(aligned_frame_count(raw, reconstructed, 4, 4), 3)
 
+    def test_aligned_frame_count_uses_common_leading_range(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "20.yuv"
+            reconstructed = root / "20_37rec.yuv"
+            size = yuv420p_frame_bytes(4, 4)
+            with open(raw, "wb") as raw_file:
+                raw_file.truncate(size * 209)
+            with open(reconstructed, "wb") as reconstructed_file:
+                reconstructed_file.truncate(size * 208)
+
+            self.assertEqual(aligned_frame_count(raw, reconstructed, 4, 4), 208)
+
 
 if __name__ == "__main__":
     unittest.main()
