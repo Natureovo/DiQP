@@ -150,3 +150,29 @@ rm -rf -- /home/cp/桌面/yx/DiQP/data/LDV_finetune
 ```
 
 结果保存在 `batchResults/preencoded_yuv/qp37_时间戳/`。`metrics.csv` 是逐视频指标，`summary.csv` 是总体汇总，`failures.csv` 记录失败项。默认模型输入是 `*_37rec.yuv`，对应的 `*_37str.bin` 不参与推理。目录名中的 `woLF` 和 `oneI` 表示特殊编码条件，这组结果应与标准 HM16.3 LDP 结果分开报告。
+
+## 7. 在 woLF + oneI 数据上微调
+
+如果最终实验目标固定为 QP 37、`woLF + oneI`，应直接使用这套重建 YUV 微调，不能混入标准 HM LDP 或 NVENC 数据。下面示例保留之前使用的测试视频，只把互不重叠的 30/5 个视频用于训练和验证：
+
+```bash
+/home/cp/anaconda3/envs/diqp/bin/python prepare_preencoded_finetune.py --raw-dir /media/cp/PHD3/DATASET/LDV_EX --encoded-dir /media/cp/PHD3/dataset_for_third_result/CQP/woLF/result_hevc_qp37_woLF_oneI --train-ids 1 2 3 4 5 6 7 8 9 11 12 13 14 15 16 17 18 19 21 22 23 24 25 26 27 28 29 30 31 32 --val-ids 33 34 35 36 37 --test-ids 20 40 60 80 100 101 102 103 104 120 140 160 180 200 220 261 267 274 --qp 37 --width 960 --height 536 --frames 120 --ffmpeg /usr/bin/ffmpeg
+```
+
+先做两步冒烟训练，再进行正式 decoder 微调：
+
+```bash
+/home/cp/anaconda3/envs/diqp/bin/python train_ldv.py --data-root data/LDV_woLF_oneI_qp37 --epochs 1 --train-scope decoder --max-steps 2 --val-fraction 0.02 --run-name smoke_decoder_woLF_oneI_qp37
+```
+
+```bash
+/home/cp/anaconda3/envs/diqp/bin/python train_ldv.py --data-root data/LDV_woLF_oneI_qp37 --epochs 5 --train-scope decoder --val-fraction 1 --run-name decoder_woLF_oneI_qp37
+```
+
+正式测试仍直接读取原始 YUV，并指定微调产生的最佳 checkpoint。测试 ID 必须保持与训练、验证集合互斥：
+
+```bash
+/home/cp/anaconda3/envs/diqp/bin/python evaluate_preencoded_yuv.py --raw-dir /media/cp/PHD3/DATASET/LDV_EX --encoded-dir /media/cp/PHD3/dataset_for_third_result/CQP/woLF/result_hevc_qp37_woLF_oneI --video-ids 20 40 60 80 100 101 102 103 104 120 140 160 180 200 220 261 267 274 --qp 37 --width 960 --height 536 --frames 120 --save-limit 0 --ffmpeg /usr/bin/ffmpeg --model-path runs/ldv_finetune/decoder_woLF_oneI_qp37/best.pt
+```
+
+视频 240 的 YUV 大小与 `960x536 yuv420p` 不匹配，确认其真实分辨率前不要放入统一测试。最终至少同时报告原始预训练模型和微调模型相对于压缩重建帧的 RGB-PSNR、Y-PSNR 与 SSIM 增益。
