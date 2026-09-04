@@ -20,11 +20,13 @@ from model import DiQP
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SEED = 1234
+DEFAULT_FINETUNE_LR = 1e-5
+DEFAULT_SCRATCH_LR = 2e-4
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Single-GPU LDV fine-tuning for the released DiQP HEVC model."
+        description="Single-GPU LDV training or fine-tuning for DiQP."
     )
     parser.add_argument(
         "--data-root",
@@ -35,13 +37,26 @@ def parse_args():
         "--pretrained",
         default=os.path.join(BASE_DIR, "pretrained", "checkpoint_HEVC.pt"),
     )
+    parser.add_argument(
+        "--from-scratch",
+        action="store_true",
+        help=(
+            "Randomly initialize DiQP instead of loading --pretrained. "
+            "This mode requires --train-scope all."
+        ),
+    )
     parser.add_argument("--resume", default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--workers", type=int, default=0)
-    parser.add_argument("--learning-rate", type=float, default=1e-5)
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=None,
+        help="Default: 1e-5 for fine-tuning, 2e-4 for --from-scratch.",
+    )
     parser.add_argument("--weight-decay", type=float, default=1e-2)
     parser.add_argument("--gradient-clip", type=float, default=1.0)
     parser.add_argument("--val-fraction", type=float, default=0.1)
@@ -312,6 +327,13 @@ def save_checkpoint(path, model, optimizer, scheduler, scaler, state):
 
 def main():
     args = parse_args()
+    initialization = "scratch" if args.from_scratch else "pretrained"
+    if args.from_scratch and args.train_scope != "all":
+        raise ValueError("--from-scratch requires --train-scope all.")
+    if args.learning_rate is None:
+        args.learning_rate = (
+            DEFAULT_SCRATCH_LR if args.from_scratch else DEFAULT_FINETUNE_LR
+        )
     if not torch.cuda.is_available():
         raise RuntimeError("LDV fine-tuning requires a CUDA GPU.")
     if args.epochs < 1 or args.batch_size < 1 or args.workers < 0:
@@ -320,6 +342,8 @@ def main():
         raise ValueError("--val-fraction must be in (0, 1].")
     if args.max_steps < 0:
         raise ValueError("--max-steps must be non-negative.")
+    if args.learning_rate <= 0 or args.weight_decay < 0:
+        raise ValueError("Learning rate must be positive and weight decay non-negative.")
 
     set_seed(SEED)
     device = torch.device("cuda")
@@ -405,10 +429,16 @@ def main():
     )
 
     model = build_model().to(device)
-    if not os.path.isfile(args.pretrained):
-        raise FileNotFoundError(f"Cannot find pretrained checkpoint: {args.pretrained}")
-    pretrained = torch.load(args.pretrained, map_location="cpu")
-    model.load_state_dict(checkpoint_state_dict(pretrained), strict=True)
+    initial_checkpoint = None
+    if not args.from_scratch:
+        initial_checkpoint = os.path.abspath(args.pretrained)
+        if args.resume is None:
+            if not os.path.isfile(args.pretrained):
+                raise FileNotFoundError(
+                    f"Cannot find pretrained checkpoint: {args.pretrained}"
+                )
+            pretrained = torch.load(args.pretrained, map_location="cpu")
+            model.load_state_dict(checkpoint_state_dict(pretrained), strict=True)
     trainable = configure_train_scope(model, args.train_scope)
     optimizer = optim.AdamW(
         trainable,
@@ -429,6 +459,12 @@ def main():
     best_gain = float("-inf")
     if args.resume is not None:
         resume = torch.load(args.resume, map_location="cpu")
+        resume_initialization = resume.get("initialization", "pretrained")
+        if resume_initialization != initialization:
+            raise ValueError(
+                "Resume checkpoint initialization differs from this run: "
+                f"{resume_initialization} vs {initialization}."
+            )
         if resume.get("train_scope") != args.train_scope:
             raise ValueError(
                 "Resume checkpoint train scope differs from --train-scope: "
@@ -483,6 +519,8 @@ def main():
         "hm_config": hm_config,
         "hm_padding": hm_padding,
         "resolution": f"{width}x{height}",
+        "initialization": initialization,
+        "initial_checkpoint": initial_checkpoint,
     }
     with open(os.path.join(output_dir, "config.json"), "w", encoding="utf8") as file:
         json.dump(config, file, indent=2)
@@ -533,7 +571,12 @@ def main():
     if encoder.startswith("hm"):
         print(f"HM config         : {hm_config}")
         print(f"HM padding        : {hm_padding}")
+    if args.from_scratch:
+        print("Initialization    : random (from scratch)")
+    else:
+        print(f"Initialization    : pretrained ({initial_checkpoint})")
     print(f"Train scope       : {args.train_scope}")
+    print(f"Learning rate     : {args.learning_rate:g}")
     print(f"Parameters        : {trainable_parameters:,} trainable / {total_parameters:,}")
     print(f"Output directory  : {output_dir}")
 
@@ -545,6 +588,8 @@ def main():
             "global_step": 0,
             "best_val_psnr_gain": best_gain,
             "train_scope": args.train_scope,
+            "initialization": initialization,
+            "initial_checkpoint": initial_checkpoint,
             "qps": qps,
             "frames": frames,
             "encoder": encoder,
@@ -634,6 +679,8 @@ def main():
             "global_step": global_step,
             "best_val_psnr_gain": max(best_gain, metrics["psnr_gain"]),
             "train_scope": args.train_scope,
+            "initialization": initialization,
+            "initial_checkpoint": initial_checkpoint,
             "qps": qps,
             "frames": frames,
             "encoder": encoder,
@@ -705,7 +752,10 @@ def main():
     history_file.close()
     qp_history_file.close()
     peak_memory = torch.cuda.max_memory_allocated() / (1024 ** 3)
-    print("Fine-tuning finished")
+    if args.from_scratch:
+        print("Training from scratch finished")
+    else:
+        print("Fine-tuning finished")
     print(f"Best checkpoint : {os.path.join(output_dir, 'best.pt')}")
     print(f"Peak GPU memory : {peak_memory:.2f} GiB")
 

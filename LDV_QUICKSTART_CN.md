@@ -168,7 +168,7 @@ rm -rf -- /home/cp/桌面/yx/DiQP/data/LDV_finetune
 ```
 
 ```bash
-/home/cp/anaconda3/envs/diqp/bin/python train_ldv.py --data-root data/LDV_woLF_oneI_qp37 --epochs 5 --train-scope decoder --val-fraction 1 --run-name decoder_woLF_oneI_qp37
+/home/cp/anaconda3/envs/diqp/bin/python train_ldv.py --data-root data/LDV_woLF_oneI_qp37 --epochs 5 --train-scope decoder --val-fraction 0.1 --run-name decoder_woLF_oneI_qp37
 ```
 
 正式测试仍直接读取原始 YUV，并指定微调产生的最佳 checkpoint。测试 ID 必须保持与训练、验证集合互斥：
@@ -178,3 +178,27 @@ rm -rf -- /home/cp/桌面/yx/DiQP/data/LDV_finetune
 ```
 
 视频 240 的 YUV 大小与 `960x536 yuv420p` 不匹配，确认其真实分辨率前不要放入统一测试。最终至少同时报告原始预训练模型和微调模型相对于压缩重建帧的 RGB-PSNR、Y-PSNR 与 SSIM 增益。
+
+## 8. 随机初始化对照实验
+
+为了判断提升来自 DiQP 的预训练能力，还是只靠当前 LDV 数据也能学到，需要增加相同网络结构、相同数据划分和相同损失函数的随机初始化对照。随机初始化必须训练全模型，不能只训练 decoder；脚本会自动把默认学习率从微调使用的 `1e-5` 调整为从零训练使用的 `2e-4`。
+
+先执行两步冒烟训练：
+
+```bash
+/home/cp/anaconda3/envs/diqp/bin/python train_ldv.py --data-root data/LDV_woLF_oneI_qp37 --from-scratch --epochs 1 --train-scope all --max-steps 2 --val-fraction 0.02 --run-name smoke_scratch_woLF_oneI_qp37
+```
+
+冒烟测试通过后执行 20 个 epoch 的正式对照训练：
+
+```bash
+/home/cp/anaconda3/envs/diqp/bin/python train_ldv.py --data-root data/LDV_woLF_oneI_qp37 --from-scratch --epochs 20 --train-scope all --val-fraction 0.1 --run-name scratch_woLF_oneI_qp37
+```
+
+训练后使用与预训练微调模型完全相同的 18 个保留测试视频评测，只替换 checkpoint：
+
+```bash
+/home/cp/anaconda3/envs/diqp/bin/python evaluate_preencoded_yuv.py --raw-dir /media/cp/PHD3/DATASET/LDV_EX --encoded-dir /media/cp/PHD3/dataset_for_third_result/CQP/woLF/result_hevc_qp37_woLF_oneI --video-ids 20 40 60 80 100 101 102 103 104 120 140 160 180 200 220 261 267 274 --qp 37 --width 960 --height 536 --frames 120 --save-limit 0 --ffmpeg /usr/bin/ffmpeg --model-path runs/ldv_finetune/scratch_woLF_oneI_qp37/best.pt
+```
+
+最终对比三组结果：原始预训练模型、预训练后全模型微调、随机初始化后全模型训练。三组必须使用同一测试集合；`best.pt` 按验证集选择，不能根据测试集结果挑选 epoch。
